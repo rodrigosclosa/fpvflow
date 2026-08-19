@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 mod ffmpeg_audio;
+pub mod audio_export;
 mod ffmpeg_video;
 mod ffmpeg_video_converter;
 mod audio_resampler;
