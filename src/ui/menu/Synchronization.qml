@@ -66,6 +66,10 @@ MenuItem {
         if (a && a.hasOwnProperty("path") && a.path) {
             if (a.hasOwnProperty("preserve_original_format"))
                 sync.audioPreserveFormat = !!a.preserve_original_format;
+            if (a.hasOwnProperty("auto_band"))   sync.audioAutoBand  = !!a.auto_band;
+            if (a.hasOwnProperty("band_lo_hz"))  sync.audioBandLo    = +a.band_lo_hz;
+            if (a.hasOwnProperty("band_hi_hz"))  sync.audioBandHi    = +a.band_hi_hz;
+            if (a.hasOwnProperty("highpass_hz")) sync.audioHighpass  = +a.highpass_hz;
 
             // O offset é aplicado depois do decode: recarregar o arquivo
             // redetecta canais/bit depth/float da origem, e só então faz sentido
@@ -86,10 +90,23 @@ MenuItem {
             "path":                     path,
             "sample_rate":              controller.get_external_audio_sample_rate(),
             "offset_seconds":           audioOffset.value / 1000.0,
-            "preserve_original_format": sync.audioPreserveFormat
+            "preserve_original_format": sync.audioPreserveFormat,
+            // Parâmetros da detecção, para que drones com frequência de pás
+            // incomum sejam ajustados sem recompilar.
+            "auto_band":                sync.audioAutoBand,
+            "band_lo_hz":               sync.audioBandLo,
+            "band_hi_hz":               sync.audioBandHi,
+            "highpass_hz":              sync.audioHighpass
         };
     }
     property bool audioPreserveFormat: true;
+    /// Se a banda das pás é detectada a partir do próprio sinal.
+    property bool audioAutoBand: true;
+    /// Banda fixa, usada quando audioAutoBand está desligado ou como fallback.
+    property real audioBandLo: 150;
+    property real audioBandHi: 900;
+    /// Corte do passa-alta aplicado ao gyro, para remover movimento intencional.
+    property real audioHighpass: 30;
     Timer {
         id: autosyncTimer;
         interval: 200;
@@ -499,6 +516,45 @@ MenuItem {
                     opacity: 0.6;
                     text: controller.get_external_audio_path();
                     visible: !!text;
+                }
+
+                // Auto-sync: correlaciona a vibração das hélices captada no
+                // áudio com a lida pelo giroscópio. Preenche o slider abaixo;
+                // o usuário pode ajustar por cima.
+                Button {
+                    text: qsTr("Auto-sync audio");
+                    icon.name: "sync";
+                    width: parent.width;
+                    visible: !!audioInfo.text;
+                    enabled: controller.gyro_loaded;
+                    onClicked: {
+                        const raw = controller.auto_sync_external_audio(
+                            sync.audioAutoBand, sync.audioBandLo, sync.audioBandHi, sync.audioHighpass);
+                        if (!raw) {
+                            autoSyncResult.text = qsTr("Not enough data to sync");
+                            autoSyncResult.isWeak = true;
+                            return;
+                        }
+                        const r = JSON.parse(raw);
+                        audioOffset.value = r.offset_seconds * 1000.0;
+
+                        // Confiança baixa quase sempre significa que a vibração
+                        // das pás não chegou ao gyro (gimbal isolando) ou que o
+                        // mic estava longe do drone.
+                        autoSyncResult.isWeak = r.confidence < 0.3;
+                        autoSyncResult.text = qsTr("Confidence: %1%").arg((r.confidence * 100).toFixed(0))
+                                            + (autoSyncResult.isWeak? " — " + qsTr("weak match, check manually") : "");
+                    }
+                }
+                BasicText {
+                    id: autoSyncResult;
+                    property bool isWeak: false;
+                    width: parent.width;
+                    leftPadding: 0;
+                    wrapMode: Text.WordWrap;
+                    font.pixelSize: 11 * dpiScale;
+                    color: isWeak? "#cc8866" : styleTextColor;
+                    visible: !!text && !!audioInfo.text;
                 }
 
                 // Offset manual. Arrastar apenas re-mapeia a posição de desenho

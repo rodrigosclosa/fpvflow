@@ -79,6 +79,11 @@ pub struct Controller {
     set_external_audio_offset: qt_method!(fn(&mut self, offset_seconds: f64)),
     /// Liga/desliga a preservação do formato original do áudio na exportação.
     set_external_audio_preserve_format: qt_method!(fn(&mut self, preserve: bool)),
+    /// Calcula o offset por correlação entre a vibração no áudio e no gyro.
+    ///
+    /// Devolve JSON com `offset_seconds` e `confidence` (0..1), ou string vazia
+    /// se não houver dados suficientes.
+    auto_sync_external_audio: qt_method!(fn(&mut self, auto_band: bool, band_lo_hz: f64, band_hi_hz: f64, highpass_hz: f64) -> QString),
     /// Estado da preservação de formato para uma extensão de saída.
     ///
     /// Devolve um JSON com `status` (`preserved` | `mismatch` | `downgrade`),
@@ -1600,6 +1605,75 @@ impl Controller {
     /// Sample rate da trilha carregada.
     fn get_external_audio_sample_rate(&self) -> u32 {
         self.external_audio.as_ref().map_or(0, |t| t.sample_rate)
+    }
+
+    /// Alinha o áudio ao vídeo por correlação da vibração das hélices.
+    ///
+    /// Compara o envelope de energia do áudio na banda das pás com o envelope da
+    /// vibração lida pelo giroscópio. Ver `gyroflow_core::audio::features` para
+    /// por que a comparação é feita entre envelopes de energia e não entre
+    /// espectros.
+    fn auto_sync_external_audio(&mut self, auto_band: bool, band_lo_hz: f64, band_hi_hz: f64, highpass_hz: f64) -> QString {
+        use gyroflow_core::audio::features::{audio_envelope, gyro_envelope, FeatureParams};
+        use gyroflow_core::audio::sync::cross_correlate;
+
+        let Some(track) = &self.external_audio else {
+            return QString::default();
+        };
+        if track.mono_analysis.is_empty() {
+            return QString::default();
+        }
+
+        let params = FeatureParams {
+            band_lo_hz: band_lo_hz as f32,
+            band_hi_hz: band_hi_hz as f32,
+            auto_band,
+            highpass_hz: highpass_hz as f32,
+        };
+
+        // Lado do áudio: opera sobre o downmix de análise, nunca sobre o áudio
+        // de export.
+        let (audio_env, env_rate) = audio_envelope(&track.mono_analysis, track.sample_rate, &params);
+        if audio_env.is_empty() || env_rate <= 0.0 {
+            return QString::default();
+        }
+
+        // Lado do gyro: as amostras vêm do file_metadata, porque o campo
+        // `raw_imu` do GyroSource costuma estar vazio (ver gyro_source/mod.rs:689).
+        let gyro_samples: Vec<(f64, [f64; 3])> = {
+            let gyro = self.stabilizer.gyro.read();
+            let md = gyro.file_metadata.read();
+            gyro.raw_imu(&md)
+                .iter()
+                .filter_map(|x| x.gyro.map(|g| (x.timestamp_ms, g)))
+                .collect()
+        };
+        if gyro_samples.len() < 2 {
+            return QString::default();
+        }
+
+        let gyro_env = gyro_envelope(&gyro_samples, env_rate, &params);
+        if gyro_env.is_empty() {
+            return QString::default();
+        }
+
+        let result = cross_correlate(&audio_env, &gyro_env, env_rate);
+
+        ::log::info!(
+            "Auto-sync de áudio: offset={:.3}s, confiança={:.3} (envelopes: áudio={}, gyro={} a {:.2} Hz)",
+            result.offset_seconds, result.confidence, audio_env.len(), gyro_env.len(), env_rate
+        );
+
+        // O valor calculado é apenas o ponto de partida: o usuário continua
+        // podendo ajustar por cima, no slider.
+        if let Some(track) = &mut self.external_audio {
+            track.offset_seconds = result.offset_seconds;
+        }
+
+        QString::from(serde_json::json!({
+            "offset_seconds": result.offset_seconds,
+            "confidence": result.confidence,
+        }).to_string())
     }
 
     /// Liga ou desliga a preservação de formato.
