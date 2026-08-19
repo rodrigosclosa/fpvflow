@@ -125,6 +125,15 @@ impl ExternalAudioEncoder {
         })
     }
 
+    /// Índice do stream de áudio no arquivo de saída.
+    ///
+    /// Usado para consultar a time base do stream no momento da escrita: o vetor
+    /// `ost_time_bases` do processador é dimensionado pelos streams de entrada e
+    /// não comporta este índice, que não corresponde a nenhum.
+    pub fn stream_index(&self) -> usize {
+        self.ost_index
+    }
+
     /// Codifica todo o buffer e escreve os pacotes no arquivo de saída.
     ///
     /// `samples` são amostras `f32` intercaladas, já recortadas e alinhadas por
@@ -149,9 +158,20 @@ impl ExternalAudioEncoder {
             input.set_rate(self.sample_rate);
             input.set_pts(Some(self.frames_written));
 
-            // `frame::Audio` com formato Packed guarda tudo no plano 0.
+            // `frame::Audio` com formato Packed guarda todos os canais no plano
+            // 0, intercalados. Mas `plane_mut::<f32>(0)` devolve uma fatia
+            // dimensionada em *frames*, não em amostras — em estéreo ela tem
+            // metade dos valores que precisamos escrever. Por isso o acesso é
+            // feito pelo buffer de dados bruto.
             let src = &samples[pos * channels..(pos + this_frame) * channels];
-            input.plane_mut::<f32>(0)[..src.len()].copy_from_slice(src);
+            let dst = input.data_mut(0);
+            let byte_len = std::mem::size_of_val(src);
+            debug_assert!(dst.len() >= byte_len, "plano menor que o esperado: {} < {byte_len}", dst.len());
+            dst[..byte_len].copy_from_slice(unsafe {
+                // `f32` não tem padding nem invariantes: reinterpretar como
+                // bytes é seguro, e é o que o ffmpeg espera receber.
+                std::slice::from_raw_parts(src.as_ptr() as *const u8, byte_len)
+            });
 
             match &mut self.resampler {
                 Some(resampler) => {

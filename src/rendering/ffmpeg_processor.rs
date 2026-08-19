@@ -33,6 +33,18 @@ pub struct FfmpegProcessor<'a> {
 
     pub audio_codec: codec::Id,
 
+    /// Trilha de áudio externa a embutir no arquivo de saída.
+    ///
+    /// Quando presente, **substitui** o áudio embutido do clipe (decisão 5 da
+    /// especificação da feature): o buffer já vem alinhado ao offset e recortado
+    /// conforme os cortes do projeto, por
+    /// `gyroflow_core::audio::export::build_from_trim_ranges`.
+    ///
+    /// O `codec::Id` acompanha porque o codec do áudio externo é decidido pelo
+    /// formato de origem — para preservá-lo sem perda —, e não pelo seletor de
+    /// codec da interface.
+    pub external_audio: Option<(gyroflow_core::audio::AudioTrack, Vec<f32>, codec::Id)>,
+
     input_context: format::context::Input,
 
     pub video: VideoTranscoder<'a>,
@@ -212,6 +224,8 @@ impl<'a> FfmpegProcessor<'a> {
 
             audio_codec: codec::Id::AAC,
 
+            external_audio: None,
+
             ost_time_bases: Vec::new(),
 
             frame_ts: Default::default(),
@@ -331,6 +345,12 @@ impl<'a> FfmpegProcessor<'a> {
                 out_stream.set_avg_frame_rate(stream.avg_frame_rate());
 
                 output_index += 1;
+            } else if medium == media::Type::Audio && self.external_audio.is_some() {
+                // Áudio externo tem prioridade sobre o embutido: o stream de
+                // entrada é descartado e o externo entra no lugar, criado depois
+                // deste laço (funciona mesmo quando o clipe não tem áudio algum).
+                stream_mapping[i] = -1;
+                continue;
             } else if medium == media::Type::Audio && self.audio_codec != codec::Id::None {
                 if self.preserve_other_tracks/*stream.codec().id() == self.audio_codec*/ {
                     // Direct stream copy
@@ -351,6 +371,27 @@ impl<'a> FfmpegProcessor<'a> {
                 output_index += 1;
             }
         }
+
+        // Stream do áudio externo. Fica fora do laço acima porque não
+        // corresponde a nenhum stream de entrada — o áudio vem de outro arquivo
+        // —, e por isso é criado mesmo quando o clipe não tem áudio nenhum.
+        let mut external_audio_encoder = None;
+        if let Some((track, _, codec_id)) = &self.external_audio {
+            log::info!(
+                "Áudio externo no export: {} ({} amostras, codec {:?})",
+                track.format_summary(),
+                track.samples.len(),
+                codec_id
+            );
+            external_audio_encoder = Some(super::audio_export::ExternalAudioEncoder::new(
+                *codec_id,
+                track,
+                &mut octx,
+                output_index,
+            )?);
+            output_index += 1;
+        }
+
         let mut updated_creation_time = None;
         if let Some(start_ms) = start_ms {
             if start_ms > 0.0 {
@@ -511,6 +552,34 @@ impl<'a> FfmpegProcessor<'a> {
                 let ost_time_base = self.ost_time_bases[*ost_index];
                 transcoder.flush(&mut octx, ost_time_base, start_ms, end_ms, &mut self.frame_ts)?;
             }
+        }
+
+        // Áudio externo: o buffer inteiro é escrito de uma vez, depois do vídeo.
+        //
+        // Escrever tudo aqui (em vez de intercalar durante o laço de frames) é
+        // possível porque o buffer já está pronto e alinhado desde o início —
+        // não depende do progresso da decodificação. O `write_interleaved` do
+        // ffmpeg reordena os pacotes por DTS ao gravá-los, então o arquivo final
+        // fica corretamente intercalado mesmo com esta ordem de chamada.
+        if let Some(encoder) = &mut external_audio_encoder {
+            // A time base vem do próprio stream de saída: `ost_time_bases` é
+            // dimensionado pelos streams de ENTRADA e não comporta este índice.
+            let ost_index = encoder.stream_index();
+            let ost_time_base = octx
+                .stream(ost_index)
+                .map(|s| s.time_base())
+                .unwrap_or(Rational(1, 90000));
+
+            let samples = self.external_audio.as_ref().map(|(_, s, _)| s.clone()).unwrap_or_default();
+            if let Err(e) = encoder.write_all(&samples, &mut octx, ost_time_base) {
+                log::error!("Falha ao escrever o áudio externo: {e:?}");
+                return Err(e.into());
+            }
+            if let Err(e) = encoder.finish(&mut octx, ost_time_base) {
+                log::error!("Falha ao finalizar o áudio externo: {e:?}");
+                return Err(e.into());
+            }
+            log::info!("Áudio externo escrito: {} amostras", samples.len());
         }
 
         octx.write_trailer()?;

@@ -3,6 +3,8 @@
 
 mod ffmpeg_audio;
 pub mod audio_export;
+#[cfg(test)]
+mod audio_export_tests;
 mod ffmpeg_video;
 mod ffmpeg_video_converter;
 mod audio_resampler;
@@ -420,6 +422,85 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     if !render_options.audio {
         proc.audio_codec = codec::Id::None;
+    }
+
+    // ---- Áudio externo ----
+    //
+    // A flag `audio` acima é o interruptor mestre: se estiver desligada, nada
+    // aqui roda e o arquivo sai sem áudio, como antes. Com ela ligada e uma
+    // trilha externa definida, o externo substitui o áudio embutido do clipe.
+    if render_options.audio && !render_options.external_audio_url.is_empty() {
+        match gyroflow_core::audio::decode::decode_file(&render_options.external_audio_url) {
+            Ok(mut track) => {
+                track.offset_seconds = render_options.external_audio_offset;
+                track.preserve_original_format = render_options.external_audio_preserve_format;
+
+                // O codec vem do formato de ORIGEM, não do seletor da interface:
+                // é o que garante que float continue float.
+                let extension = std::path::Path::new(&render_options.output_filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+
+                let compat = gyroflow_core::audio::export::check_format_compatibility(
+                    track.source_format,
+                    extension,
+                    track.preserve_original_format,
+                );
+
+                use gyroflow_core::audio::export::FormatCompatibility;
+                let codec_name = match &compat {
+                    FormatCompatibility::Preserved { codec } => *codec,
+                    FormatCompatibility::DowngradeAccepted { codec } => *codec,
+                    // O container não comporta o formato. A interface avisa antes
+                    // do export (selo no painel de sincronização); aqui, se ainda
+                    // assim chegou, registramos e usamos AAC para não abortar o
+                    // render inteiro — mas o aviso já foi dado.
+                    FormatCompatibility::ContainerMismatch { wanted_codec, extension, suggested_extension } => {
+                        log::warn!(
+                            "Áudio externo: {wanted_codec} não cabe em .{extension}. \
+                             Troque a saída para .{suggested_extension} para preservar o formato. \
+                             Exportando com AAC."
+                        );
+                        "AAC"
+                    }
+                };
+
+                let codec_id = match codec_name {
+                    "PCM (f32le)" => codec::Id::PCM_F32LE,
+                    "PCM (s24le)" => codec::Id::PCM_S24LE,
+                    "PCM (s16le)" => codec::Id::PCM_S16LE,
+                    _ => codec::Id::AAC,
+                };
+
+                // Buffer já alinhado ao offset e recortado conforme os cortes do
+                // projeto. Os trim_ranges do core são normalizados de 0 a 1.
+                let (trim_ranges, video_duration_s) = {
+                    let params = stab.params.read();
+                    (params.trim_ranges.clone(), params.get_scaled_duration_ms() / 1000.0)
+                };
+
+                let samples = gyroflow_core::audio::export::build_from_trim_ranges(
+                    &track,
+                    &trim_ranges,
+                    video_duration_s,
+                );
+
+                log::info!(
+                    "Áudio externo preparado: {} | offset {:.3}s | {} amostras | codec {codec_name}",
+                    track.format_summary(),
+                    track.offset_seconds,
+                    samples.len()
+                );
+
+                proc.external_audio = Some((track, samples, codec_id));
+            }
+            Err(e) => {
+                // Falhar aqui não deve abortar a exportação do vídeo: o usuário
+                // recebe o vídeo estabilizado e o log explica o que houve.
+                log::error!("Não foi possível carregar o áudio externo para o export: {e}");
+            }
+        }
     }
 
     log::debug!("start_us: {}, render_duration: {}, render_frame_count: {}", start_us, render_duration, render_frame_count);

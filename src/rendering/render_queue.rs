@@ -88,6 +88,17 @@ pub struct RenderOptions {
     pub export_trims_separately: bool,
     pub audio_codec: String,
     pub interpolation: String,
+
+    /// URL da trilha de áudio externa, quando houver.
+    ///
+    /// A `flag audio` acima continua sendo o interruptor mestre: com ela
+    /// desligada não sai áudio nenhum, externo ou embutido. Com ela ligada e
+    /// este campo preenchido, o áudio externo substitui o embutido.
+    pub external_audio_url: String,
+    /// Deslocamento do áudio externo, em segundos (`t_audio = t_video + offset`).
+    pub external_audio_offset: f64,
+    /// Se o formato de origem do áudio externo deve ser preservado sem perda.
+    pub external_audio_preserve_format: bool,
 }
 impl RenderOptions {
     pub fn settings_string(&self, fps: f64) -> String {

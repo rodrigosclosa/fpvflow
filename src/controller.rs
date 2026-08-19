@@ -75,6 +75,10 @@ pub struct Controller {
     get_external_audio_url: qt_method!(fn(&self) -> QString),
     /// Sample rate da trilha carregada, ou 0.
     get_external_audio_sample_rate: qt_method!(fn(&self) -> u32),
+    /// Offset da trilha em segundos, ou 0.
+    get_external_audio_offset: qt_method!(fn(&self) -> f64),
+    /// Se a preservação de formato está ligada (default `true`).
+    get_external_audio_preserve_format: qt_method!(fn(&self) -> bool),
     /// Define o offset da trilha, em segundos (`t_audio = t_video + offset`).
     set_external_audio_offset: qt_method!(fn(&mut self, offset_seconds: f64)),
     /// Liga/desliga a preservação do formato original do áudio na exportação.
@@ -1605,6 +1609,19 @@ impl Controller {
     /// Sample rate da trilha carregada.
     fn get_external_audio_sample_rate(&self) -> u32 {
         self.external_audio.as_ref().map_or(0, |t| t.sample_rate)
+    }
+
+    /// Offset da trilha, em segundos.
+    fn get_external_audio_offset(&self) -> f64 {
+        self.external_audio.as_ref().map_or(0.0, |t| t.offset_seconds)
+    }
+
+    /// Se a preservação de formato está ligada.
+    ///
+    /// Sem trilha carregada devolve `true`, que é o default da especificação —
+    /// assim o valor nunca chega ao render sugerindo que a perda foi aceita.
+    fn get_external_audio_preserve_format(&self) -> bool {
+        self.external_audio.as_ref().map_or(true, |t| t.preserve_original_format)
     }
 
     /// Alinha o áudio ao vídeo por correlação da vibração das hélices.

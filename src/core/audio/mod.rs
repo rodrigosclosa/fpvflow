@@ -29,6 +29,9 @@ pub mod features;
 pub mod sync;
 pub mod waveform;
 
+#[cfg(test)]
+mod tests_integration;
+
 use std::fmt;
 
 /// Formato do arquivo de origem, preservado para reencodar sem perda.

@@ -18,7 +18,7 @@
 //! o usuário possa importar também o `.m4a` que alguns gravadores produzem.
 
 use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecType, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSource, MediaSourceStream};
@@ -77,6 +77,40 @@ pub enum DecodeError {
 
     #[error("A trilha de áudio está vazia")]
     Empty,
+}
+
+/// Traduz o formato de origem a partir do **tipo de codec**.
+///
+/// Para PCM, o symphonia não preenche `sample_format` nos parâmetros do stream —
+/// a informação está no `CodecType`. Ignorar isso faria um WAV 32-bit float ser
+/// classificado como `Other` e exportado com perda, violando a decisão 7 da
+/// especificação. Este foi um bug real, pego pelos testes com arquivo de
+/// verdade.
+fn map_codec_type(codec: CodecType) -> Option<SourceFormat> {
+    use symphonia::core::codecs::*;
+    match codec {
+        CODEC_TYPE_PCM_F32LE | CODEC_TYPE_PCM_F32BE | CODEC_TYPE_PCM_F64LE | CODEC_TYPE_PCM_F64BE
+        | CODEC_TYPE_PCM_F32LE_PLANAR | CODEC_TYPE_PCM_F32BE_PLANAR
+        | CODEC_TYPE_PCM_F64LE_PLANAR | CODEC_TYPE_PCM_F64BE_PLANAR => Some(SourceFormat::F32),
+
+        CODEC_TYPE_PCM_S32LE | CODEC_TYPE_PCM_S32BE | CODEC_TYPE_PCM_U32LE | CODEC_TYPE_PCM_U32BE
+        | CODEC_TYPE_PCM_S32LE_PLANAR | CODEC_TYPE_PCM_S32BE_PLANAR
+        | CODEC_TYPE_PCM_U32LE_PLANAR | CODEC_TYPE_PCM_U32BE_PLANAR => Some(SourceFormat::S32),
+
+        CODEC_TYPE_PCM_S24LE | CODEC_TYPE_PCM_S24BE | CODEC_TYPE_PCM_U24LE | CODEC_TYPE_PCM_U24BE
+        | CODEC_TYPE_PCM_S24LE_PLANAR | CODEC_TYPE_PCM_S24BE_PLANAR
+        | CODEC_TYPE_PCM_U24LE_PLANAR | CODEC_TYPE_PCM_U24BE_PLANAR => Some(SourceFormat::S24),
+
+        CODEC_TYPE_PCM_S16LE | CODEC_TYPE_PCM_S16BE | CODEC_TYPE_PCM_U16LE | CODEC_TYPE_PCM_U16BE
+        | CODEC_TYPE_PCM_S16LE_PLANAR | CODEC_TYPE_PCM_S16BE_PLANAR
+        | CODEC_TYPE_PCM_U16LE_PLANAR | CODEC_TYPE_PCM_U16BE_PLANAR => Some(SourceFormat::S16),
+
+        CODEC_TYPE_PCM_S8 | CODEC_TYPE_PCM_U8
+        | CODEC_TYPE_PCM_S8_PLANAR | CODEC_TYPE_PCM_U8_PLANAR => Some(SourceFormat::U8),
+
+        // Não é PCM: provavelmente um codec com perda, tratado pelo chamador.
+        _ => None,
+    }
 }
 
 /// Traduz o formato relatado pelo symphonia para o enum que guardamos.
@@ -161,7 +195,11 @@ pub fn decode_file(url: &str) -> Result<AudioTrack, DecodeError> {
     let params = track.codec_params.clone();
 
     let sample_rate = params.sample_rate.ok_or(DecodeError::MissingSampleRate)?;
-    let source_format = map_source_format(params.sample_format, params.bits_per_sample);
+
+    // Para PCM o formato vem do tipo de codec;  costuma estar
+    // vazio. Só quando o codec não é PCM (AAC, MP3...) caímos no sample_format.
+    let source_format = map_codec_type(params.codec)
+        .unwrap_or_else(|| map_source_format(params.sample_format, params.bits_per_sample));
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&params, &DecoderOptions::default())

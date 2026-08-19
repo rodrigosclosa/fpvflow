@@ -139,7 +139,14 @@ MenuItem {
             pad_with_black:        padWithBlack.checked,
             export_trims_separately: exportTrimsSeparately.checked,
             audio_codec:           audioCodec.currentText,
-            interpolation:         interpolationMethod.currentText
+            interpolation:         interpolationMethod.currentText,
+
+            // Áudio externo. A flag `audio` acima continua sendo o gate mestre:
+            // desligada, não sai áudio nenhum. Ligada e com trilha externa
+            // definida, o externo substitui o áudio embutido do clipe.
+            external_audio_url:             controller.get_external_audio_url(),
+            external_audio_offset:          controller.get_external_audio_offset(),
+            external_audio_preserve_format: controller.get_external_audio_preserve_format()
         };
     }
 
