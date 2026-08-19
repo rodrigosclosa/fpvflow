@@ -759,6 +759,9 @@ Rectangle {
         return {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
+            // Trilha de áudio externa: caminho, offset e preferência de
+            // preservação de formato. Projetos sem esta chave abrem normalmente.
+            "audio_sync": sync.item.getAudioSyncSettings(),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate

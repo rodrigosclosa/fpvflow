@@ -58,7 +58,38 @@ MenuItem {
             if (o.hasOwnProperty("auto_sync_points")) experimentalAutoSyncPoints.checked    = !!o.auto_sync_points;
             if (o.hasOwnProperty("do_autosync") && o.do_autosync) autosyncTimer.doRun = true;
         }
+
+        // ---- Áudio externo ----
+        // Chave separada de "synchronization" para não colidir com o sync óptico.
+        // Projetos salvos antes desta feature simplesmente não têm a chave.
+        const a = obj.audio_sync || { };
+        if (a && a.hasOwnProperty("path") && a.path) {
+            if (a.hasOwnProperty("preserve_original_format"))
+                sync.audioPreserveFormat = !!a.preserve_original_format;
+
+            // O offset é aplicado depois do decode: recarregar o arquivo
+            // redetecta canais/bit depth/float da origem, e só então faz sentido
+            // reposicionar a waveform.
+            const pendingOffset = a.hasOwnProperty("offset_seconds") ? +a.offset_seconds : 0.0;
+            const waveform = window.videoArea.timeline.getAudioWaveform();
+            if (controller.import_external_audio_url(a.path, waveform)) {
+                audioOffset.value = pendingOffset * 1000.0;
+            }
+        }
     }
+
+    /// Estado da trilha de áudio externa gravado no `.gyroflow`.
+    function getAudioSyncSettings(): var {
+        const path = controller.get_external_audio_url();
+        if (!path) return { };
+        return {
+            "path":                     path,
+            "sample_rate":              controller.get_external_audio_sample_rate(),
+            "offset_seconds":           audioOffset.value / 1000.0,
+            "preserve_original_format": sync.audioPreserveFormat
+        };
+    }
+    property bool audioPreserveFormat: true;
     Timer {
         id: autosyncTimer;
         interval: 200;
@@ -470,11 +501,58 @@ MenuItem {
                     visible: !!text;
                 }
 
+                // Offset manual. Arrastar apenas re-mapeia a posição de desenho
+                // da waveform: nada do áudio é redecodificado.
+                Label {
+                    position: Label.LeftPosition;
+                    text: qsTr("Offset");
+                    visible: !!audioInfo.text;
+                    width: parent.width;
+
+                    SliderWithField {
+                        id: audioOffset;
+                        width: parent.width;
+                        from: -30000;
+                        to: 30000;
+                        value: 0;
+                        defaultValue: 0;
+                        unit: qsTr("ms");
+                        precision: 1;
+                        live: true;
+                        onValueChanged: {
+                            const seconds = value / 1000.0;
+                            const waveform = window.videoArea.timeline.getAudioWaveform();
+                            if (waveform) waveform.offsetSeconds = seconds;
+                            // A lane redesenha sozinha; o controller guarda o
+                            // valor porque é dele que o export vai ler.
+                            controller.set_external_audio_offset(seconds);
+                        }
+                    }
+                }
+
+                // O mesmo offset em frames, porque é assim que o usuário pensa
+                // ao comparar com a timeline de um editor.
+                BasicText {
+                    width: parent.width;
+                    leftPadding: 0;
+                    visible: !!audioInfo.text;
+                    opacity: 0.7;
+                    text: {
+                        const fps = controller.get_scaled_fps();
+                        if (!fps) return "";
+                        const frames = (audioOffset.value / 1000.0) * fps;
+                        return qsTr("%1 frames @ %2 fps").arg(frames.toFixed(2)).arg(fps.toFixed(3));
+                    }
+                }
+
                 Button {
                     text: qsTr("Remove audio");
                     width: parent.width;
                     visible: !!audioInfo.text;
-                    onClicked: controller.clear_external_audio(window.videoArea.timeline.getAudioWaveform());
+                    onClicked: {
+                        controller.clear_external_audio(window.videoArea.timeline.getAudioWaveform());
+                        audioOffset.value = 0;
+                    }
                 }
             }
         }

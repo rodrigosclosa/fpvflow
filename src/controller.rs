@@ -66,8 +66,17 @@ pub struct Controller {
     // ---- Áudio externo (feature de sincronização de áudio) ----
     /// Importa um arquivo de áudio e entrega a trilha decodificada à lane da waveform.
     import_external_audio: qt_method!(fn(&mut self, url: QUrl, waveform: QJSValue)),
+    /// Importa a partir de uma URL já em texto — usado ao reabrir um projeto.
+    /// Devolve `true` se a trilha foi carregada.
+    import_external_audio_url: qt_method!(fn(&mut self, url: QString, waveform: QJSValue) -> bool),
     /// Remove a trilha importada.
     clear_external_audio: qt_method!(fn(&mut self, waveform: QJSValue)),
+    /// URL da trilha carregada, no formato interno (serializável no projeto).
+    get_external_audio_url: qt_method!(fn(&self) -> QString),
+    /// Sample rate da trilha carregada, ou 0.
+    get_external_audio_sample_rate: qt_method!(fn(&self) -> u32),
+    /// Define o offset da trilha, em segundos (`t_audio = t_video + offset`).
+    set_external_audio_offset: qt_method!(fn(&mut self, offset_seconds: f64)),
     /// Resumo do formato da trilha carregada (ex.: `"48000 Hz, 2 ch, 32-bit float"`).
     get_external_audio_info: qt_method!(fn(&self) -> QString),
     /// Caminho da trilha carregada, ou string vazia.
@@ -1507,8 +1516,24 @@ impl Controller {
     /// carregamentos de vídeo precisam.
     fn import_external_audio(&mut self, url: QUrl, waveform: QJSValue) {
         let url = util::qurl_to_encoded(url);
+        self.load_external_audio(&url, waveform, true);
+    }
 
-        match gyroflow_core::audio::decode::decode_file(&url) {
+    /// Importa a partir de uma URL em texto, como gravada no `.gyroflow`.
+    ///
+    /// Erros aqui são silenciosos por design: reabrir um projeto cujo áudio foi
+    /// movido ou apagado não deve interromper o carregamento do resto com um
+    /// diálogo de erro. O retorno `false` deixa o QML manter o offset zerado.
+    fn import_external_audio_url(&mut self, url: QString, waveform: QJSValue) -> bool {
+        self.load_external_audio(&url.to_string(), waveform, false)
+    }
+
+    /// Caminho comum de importação.
+    ///
+    /// `report_errors` distingue a ação explícita do usuário (que merece um
+    /// diálogo) do carregamento automático de projeto (que apenas registra log).
+    fn load_external_audio(&mut self, url: &str, waveform: QJSValue, report_errors: bool) -> bool {
+        match gyroflow_core::audio::decode::decode_file(url) {
             Ok(track) => {
                 ::log::info!("Áudio externo importado: {} ({})", url, track.format_summary());
 
@@ -1518,10 +1543,14 @@ impl Controller {
                 }
                 self.external_audio = Some(track);
                 self.external_audio_changed();
+                true
             }
             Err(e) => {
                 ::log::error!("Falha ao importar áudio externo {}: {}", url, e);
-                self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                if report_errors {
+                    self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                }
+                false
             }
         }
     }
@@ -1549,6 +1578,30 @@ impl Controller {
         match &self.external_audio {
             Some(track) => QString::from(gyroflow_core::filesystem::display_url(&track.path)),
             None => QString::default(),
+        }
+    }
+
+    /// URL interna da trilha, como deve ser gravada no projeto.
+    fn get_external_audio_url(&self) -> QString {
+        match &self.external_audio {
+            Some(track) => QString::from(track.path.clone()),
+            None => QString::default(),
+        }
+    }
+
+    /// Sample rate da trilha carregada.
+    fn get_external_audio_sample_rate(&self) -> u32 {
+        self.external_audio.as_ref().map_or(0, |t| t.sample_rate)
+    }
+
+    /// Registra o offset ajustado pelo usuário.
+    ///
+    /// A lane da waveform recebe o mesmo valor diretamente do QML (para
+    /// redesenhar sem intermediários); aqui o valor é guardado porque é a
+    /// `AudioTrack` do controller que a exportação vai consultar na Fase 3.
+    fn set_external_audio_offset(&mut self, offset_seconds: f64) {
+        if let Some(track) = &mut self.external_audio {
+            track.offset_seconds = offset_seconds;
         }
     }
 
