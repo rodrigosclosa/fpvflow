@@ -200,6 +200,9 @@ pub fn build_segment(track: &AudioTrack, t_in_s: f64, t_out_s: f64) -> Vec<f32> 
 /// Usado quando a exportação tem múltiplos intervalos de corte: cada trecho é
 /// mapeado independentemente e os buffers são emendados, espelhando o que o
 /// vídeo faz.
+///
+/// Os tempos são em **segundos**. Para os `trim_ranges` do core, que são
+/// normalizados de 0 a 1, use [`build_from_trim_ranges`].
 pub fn build_segments(track: &AudioTrack, ranges: &[(f64, f64)]) -> Vec<f32> {
     if ranges.is_empty() {
         return Vec::new();
@@ -209,6 +212,30 @@ pub fn build_segments(track: &AudioTrack, ranges: &[(f64, f64)]) -> Vec<f32> {
         out.extend_from_slice(&build_segment(track, *t_in, *t_out));
     }
     out
+}
+
+/// Monta o buffer de áudio a partir dos cortes do projeto.
+///
+/// `trim_ranges` são os
+/// [`StabilizationParams::trim_ranges`](crate::stabilization_params::StabilizationParams::trim_ranges),
+/// **normalizados de 0 a 1** sobre a duração do vídeo — não em segundos.
+///
+/// Lista vazia significa "sem corte": o áudio cobre o vídeo inteiro.
+pub fn build_from_trim_ranges(track: &AudioTrack, trim_ranges: &[(f64, f64)], video_duration_s: f64) -> Vec<f32> {
+    if video_duration_s <= 0.0 {
+        return Vec::new();
+    }
+
+    if trim_ranges.is_empty() {
+        return build_segment(track, 0.0, video_duration_s);
+    }
+
+    let in_seconds: Vec<(f64, f64)> = trim_ranges
+        .iter()
+        .map(|(from, to)| (from * video_duration_s, to * video_duration_s))
+        .collect();
+
+    build_segments(track, &in_seconds)
 }
 
 #[cfg(test)]
@@ -301,6 +328,47 @@ mod tests {
         assert_eq!(seg.len(), 10);
         assert_eq!(seg[0], 0.0);
         assert_eq!(seg[5], 50.0);
+    }
+
+    #[test]
+    fn trim_ranges_normalizados_viram_segundos() {
+        // 1000 frames a 1000 Hz = 1 s de áudio, para um vídeo de 1 s.
+        let mut t = track(1000, 1000, 0.0);
+        t.samples = (0..1000).map(|i| i as f32).collect();
+
+        // Range normalizado [0.25, 0.5] de um vídeo de 1 s = [0.25 s, 0.5 s].
+        let seg = build_from_trim_ranges(&t, &[(0.25, 0.5)], 1.0);
+        assert_eq!(seg.len(), 250);
+        assert_eq!(seg[0], 250.0);
+        assert_eq!(seg[249], 499.0);
+    }
+
+    #[test]
+    fn sem_trim_o_audio_cobre_o_video_inteiro() {
+        let t = track(1000, 1000, 0.0);
+        let seg = build_from_trim_ranges(&t, &[], 1.0);
+        assert_eq!(seg.len(), 1000);
+    }
+
+    #[test]
+    fn multiplos_trim_ranges_sao_concatenados() {
+        let mut t = track(1000, 1000, 0.0);
+        t.samples = (0..1000).map(|i| i as f32).collect();
+
+        let seg = build_from_trim_ranges(&t, &[(0.0, 0.1), (0.9, 1.0)], 1.0);
+        assert_eq!(seg.len(), 200);
+        assert_eq!(seg[0], 0.0);      // início do primeiro range
+        assert_eq!(seg[100], 900.0);  // início do segundo, logo após a emenda
+    }
+
+    #[test]
+    fn trim_com_offset_desloca_o_audio_junto() {
+        let mut t = track(1000, 1000, 0.1); // +100 ms
+        t.samples = (0..1000).map(|i| i as f32).collect();
+
+        // Vídeo em [0.0, 0.1] com offset +0.1 s → áudio em [0.1, 0.2].
+        let seg = build_from_trim_ranges(&t, &[(0.0, 0.1)], 1.0);
+        assert_eq!(seg[0], 100.0);
     }
 
     #[test]
