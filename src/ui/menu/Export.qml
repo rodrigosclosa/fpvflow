@@ -594,7 +594,10 @@ MenuItem {
             enabled: audio.checked;
             ComboBox {
                 id: audioCodec;
-                model: ["AAC", "PCM (s16le)", "PCM (s16be)", "PCM (s24le)", "PCM (s24be)"];
+                // PCM (f32le) preserva áudio 32-bit float (DJI Mic e similares)
+                // sem perda. Só cabe em MOV/MKV — o painel de sincronização
+                // avisa quando o container escolhido não o comporta.
+                model: ["AAC", "PCM (s16le)", "PCM (s16be)", "PCM (s24le)", "PCM (s24be)", "PCM (f32le)"];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
                 currentIndex: 0;

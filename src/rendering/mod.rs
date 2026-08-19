@@ -253,6 +253,10 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         "PCM (s16be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S16BE,
         "PCM (s24le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24LE,
         "PCM (s24be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24BE,
+        // 32-bit float: necessário para preservar sem perda o áudio de
+        // gravadores que produzem float (DJI Mic e similares). Não cabe em MP4
+        // — ver a checagem de compatibilidade em audio_export.rs.
+        "PCM (f32le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_F32LE,
         _ => { }
     }
 

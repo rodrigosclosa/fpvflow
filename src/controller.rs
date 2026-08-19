@@ -77,6 +77,14 @@ pub struct Controller {
     get_external_audio_sample_rate: qt_method!(fn(&self) -> u32),
     /// Define o offset da trilha, em segundos (`t_audio = t_video + offset`).
     set_external_audio_offset: qt_method!(fn(&mut self, offset_seconds: f64)),
+    /// Liga/desliga a preservação do formato original do áudio na exportação.
+    set_external_audio_preserve_format: qt_method!(fn(&mut self, preserve: bool)),
+    /// Estado da preservação de formato para uma extensão de saída.
+    ///
+    /// Devolve um JSON com `status` (`preserved` | `mismatch` | `downgrade`),
+    /// `codec`, e — no caso de conflito — `suggested_extension`. A interface usa
+    /// isso para avisar **antes** do export, nunca depois.
+    get_external_audio_format_status: qt_method!(fn(&self, extension: QString) -> QString),
     /// Resumo do formato da trilha carregada (ex.: `"48000 Hz, 2 ch, 32-bit float"`).
     get_external_audio_info: qt_method!(fn(&self) -> QString),
     /// Caminho da trilha carregada, ou string vazia.
@@ -1592,6 +1600,59 @@ impl Controller {
     /// Sample rate da trilha carregada.
     fn get_external_audio_sample_rate(&self) -> u32 {
         self.external_audio.as_ref().map_or(0, |t| t.sample_rate)
+    }
+
+    /// Liga ou desliga a preservação de formato.
+    ///
+    /// Desligar é uma escolha explícita do usuário, ciente da perda — nunca deve
+    /// acontecer automaticamente (decisão 7 da especificação).
+    fn set_external_audio_preserve_format(&mut self, preserve: bool) {
+        if let Some(track) = &mut self.external_audio {
+            track.preserve_original_format = preserve;
+        }
+        self.external_audio_changed();
+    }
+
+    /// Informa como o áudio sairá com a extensão de saída escolhida.
+    ///
+    /// Devolve JSON para a interface montar o selo de preservação e, no caso de
+    /// conflito, oferecer a troca de container antes que o export comece.
+    fn get_external_audio_format_status(&self, extension: QString) -> QString {
+        use gyroflow_core::audio::export::{check_format_compatibility, FormatCompatibility};
+
+        let Some(track) = &self.external_audio else {
+            return QString::default();
+        };
+
+        let result = check_format_compatibility(
+            track.source_format,
+            &extension.to_string(),
+            track.preserve_original_format,
+        );
+
+        let json = match result {
+            FormatCompatibility::Preserved { codec } => serde_json::json!({
+                "status": "preserved",
+                "codec": codec,
+                "source_format": track.source_format.label(),
+            }),
+            FormatCompatibility::ContainerMismatch { wanted_codec, extension, suggested_extension } => {
+                serde_json::json!({
+                    "status": "mismatch",
+                    "codec": wanted_codec,
+                    "source_format": track.source_format.label(),
+                    "extension": extension,
+                    "suggested_extension": suggested_extension,
+                })
+            }
+            FormatCompatibility::DowngradeAccepted { codec } => serde_json::json!({
+                "status": "downgrade",
+                "codec": codec,
+                "source_format": track.source_format.label(),
+            }),
+        };
+
+        QString::from(json.to_string())
     }
 
     /// Registra o offset ajustado pelo usuário.

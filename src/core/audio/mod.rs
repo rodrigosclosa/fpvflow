@@ -24,6 +24,7 @@
 //! formato de saída acontece uma única vez, no encode.
 
 pub mod decode;
+pub mod export;
 pub mod waveform;
 
 use std::fmt;

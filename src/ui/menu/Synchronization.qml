@@ -545,6 +545,82 @@ MenuItem {
                     }
                 }
 
+                // Selo de preservação de formato. Qualquer perda de precisão
+                // precisa ser visível ANTES do export, nunca uma surpresa no
+                // arquivo final.
+                Rectangle {
+                    id: formatBadge;
+                    width: parent.width;
+                    height: badgeText.height + 12 * dpiScale;
+                    visible: !!audioInfo.text && !!badgeText.text;
+                    radius: 4 * dpiScale;
+                    color: formatBadge.isMismatch? "#40cc6666" : "#4066cc66";
+
+                    property bool isMismatch: false;
+
+                    function refresh(): void {
+                        // A extensão manda: é o container do vídeo que decide se
+                        // o áudio cabe. Vem do nome de arquivo escolhido no
+                        // painel de exportação.
+                        const filename = window.outputFile? window.outputFile.filename : "";
+                        const dot = filename.lastIndexOf(".");
+                        const ext = dot >= 0? filename.substring(dot + 1) : "";
+                        if (!ext) { badgeText.text = ""; return; }
+
+                        const raw = controller.get_external_audio_format_status(ext);
+                        if (!raw) { badgeText.text = ""; return; }
+
+                        const s = JSON.parse(raw);
+                        formatBadge.isMismatch = s.status === "mismatch";
+                        switch (s.status) {
+                            case "preserved":
+                                badgeText.text = qsTr("Audio: %1 preserved (%2)").arg(s.source_format).arg(s.codec);
+                                break;
+                            case "mismatch":
+                                badgeText.text = qsTr("Audio: %1 does not fit in .%2. Switch the output to .%3 or the audio will be converted.")
+                                                 .arg(s.source_format).arg(s.extension).arg(s.suggested_extension);
+                                break;
+                            case "downgrade":
+                                badgeText.text = qsTr("Audio: will be converted to %1").arg(s.codec);
+                                break;
+                        }
+                    }
+
+                    BasicText {
+                        id: badgeText;
+                        anchors.centerIn: parent;
+                        width: parent.width - 12 * dpiScale;
+                        wrapMode: Text.WordWrap;
+                        font.pixelSize: 11 * dpiScale;
+                    }
+
+                    Connections {
+                        target: controller;
+                        function onExternal_audio_changed() { formatBadge.refresh(); }
+                    }
+                    // O container pode mudar depois do áudio ser importado
+                    // (trocar o codec de vídeo troca a extensão), e o selo tem
+                    // que acompanhar.
+                    Connections {
+                        target: window.outputFile;
+                        ignoreUnknownSignals: true;
+                        function onFilenameChanged() { formatBadge.refresh(); }
+                    }
+                }
+
+                CheckBox {
+                    text: qsTr("Preserve original audio format");
+                    checked: sync.audioPreserveFormat;
+                    visible: !!audioInfo.text;
+                    // Desligar é uma escolha explícita: com isto ligado (default)
+                    // o áudio nunca é convertido sem aviso.
+                    onCheckedChanged: {
+                        sync.audioPreserveFormat = checked;
+                        controller.set_external_audio_preserve_format(checked);
+                        formatBadge.refresh();
+                    }
+                }
+
                 Button {
                     text: qsTr("Remove audio");
                     width: parent.width;
