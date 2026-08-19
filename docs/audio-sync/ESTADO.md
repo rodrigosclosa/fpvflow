@@ -10,78 +10,107 @@
 | Fase | Escopo | Estado |
 |---|---|---|
 | 0 | Reconhecimento + build limpo | ✅ concluída |
-| 1 | Decode + waveform na timeline | ✅ código completo |
-| 2 | Slider manual + persistência | ✅ código completo |
-| 3 | Export com muxing + preservação de formato | 🟡 **parcial** — falta o passo final |
-| 4 | Trim respeitando o áudio | ✅ lógica completa (depende da Fase 3) |
-| 5 | Auto-sync por correlação | ✅ código completo |
+| 1 | Decode + waveform na timeline | ✅ concluída |
+| 2 | Slider manual + persistência | ✅ concluída |
+| 3 | Export com muxing + preservação de formato | ✅ concluída e **validada com arquivo real** |
+| 4 | Trim respeitando o áudio | ✅ concluída |
+| 5 | Auto-sync por correlação | ✅ concluída (falta material real de drone) |
 
-**40 testes unitários passando.** `cargo build --release` verde. `clippy` sem
-avisos no módulo `audio` (os 7 erros que ele aponta no core são pré-existentes,
-em `cpu_undistort`, `splines`, `lens_profile` e `filesystem`).
-
-**Nenhuma fase foi validada com material real.** Ver "O que falta" abaixo.
+**149 testes passando** (47 no `gyroflow-core`, 102 no crate raiz).
+`cargo build --release` verde; binário verificado executando.
+`clippy` sem avisos no módulo `audio` — os 7 erros que ele aponta no core são
+pré-existentes, em `cpu_undistort`, `splines`, `lens_profile` e `filesystem`.
 
 ---
 
-## O que falta
+## O que foi verificado rodando de verdade
 
-### 1. Ligar o encoder ao pipeline de exportação (Fase 3)
+Não só compila: o pipeline foi exercitado com arquivos reais, e o resultado
+conferido com `ffprobe`.
 
-É o único item de **código** pendente, e sem ele o áudio externo não chega ao
-arquivo exportado.
+### Exportação com áudio 32-bit float preservado
 
-Tudo o que ele precisa já existe e compila:
+Vídeo H.264 de 3 s + WAV IEEE float estéreo de 5 s, saída `.mov`:
 
-- `gyroflow_core::audio::export::build_from_trim_ranges` monta o buffer já
-  alinhado e recortado.
-- `gyroflow_core::audio::export::check_format_compatibility` decide o codec e
-  detecta o conflito float×MP4.
-- `rendering::audio_export::ExternalAudioEncoder` cria o stream, codifica e
-  escreve os pacotes.
+```
+codec_name=pcm_f32le    sample_fmt=flt
+sample_rate=48000       channels=2       duration=3.000000
+```
 
-Falta chamá-los de dentro do `FfmpegProcessor`. Os pontos de enxerto:
+Float entra, float sai. Taxa e contagem de canais originais intactas, e o áudio
+com a mesma duração do vídeo — das 480.000 amostras do arquivo, 288.000 foram
+escritas e o excedente cortado.
 
-| Onde | O quê |
-|---|---|
-| `ffmpeg_processor.rs:334-343` | Quando houver áudio externo, **não** criar o `AudioTranscoder` do stream de entrada — o externo tem prioridade (decisão 5 da especificação). |
-| `ffmpeg_processor.rs:~350` | Instanciar o `ExternalAudioEncoder` depois dos streams de vídeo, mesmo quando o arquivo de entrada não tem áudio nenhum. |
-| `ffmpeg_processor.rs:~509` | Chamar `write_all` com o buffer e, ao fim, `finish()` para drenar o encoder. |
-| `render_queue.rs:79-89` | Campos de áudio externo no `RenderOptions`, para que o buffer chegue ao processador. |
+### Offset medido no arquivo final
 
-**Por que não foi feito:** o fluxo de escrita de pacotes do `FfmpegProcessor`
-intercala vídeo e áudio com controle de timestamps (`FrameTimestamps`), e
-inserir um stream que não vem do input exige acertar a ordem de escrita e o
-`interleaved` do muxer. Escrever isso sem conseguir exportar um vídeo de teste
-produziria código plausível e não verificado — exatamente o que a instrução de
-"nunca invente APIs" existe para evitar. O caminho está mapeado acima e a parte
-difícil (o encoder sem stream de entrada) já está pronta e compilando.
+O WAV de teste tem um transiente em `t = 2,0 s`. No vídeo exportado:
 
-**O que já está decidido:** o fork do `ffmpeg-next` **não** precisa ser
-modificado. `add_stream`, `avcodec_alloc_context3` e `encoder().audio()` são as
-mesmas APIs públicas que o `AudioTranscoder` já usa (`ffmpeg_audio.rs:17-46`).
-Isso resolve a dúvida do item 3(a) da Fase 0 e elimina o risco de aumento de
-escopo que o prompt mestre antecipava.
+| offset pedido | transiente aparece em | deslocamento |
+|---|---|---|
+| 0,0 s | 2,001 s | — |
+| +1,0 s | 1,001 s | **1,000 s** |
 
-### 2. Validação manual
+Erro de um único sample, vindo do arredondamento. A convenção
+`t_audio = t_video + offset` está correta ponta a ponta.
 
-Nada abaixo pode ser verificado sem os arquivos e a interface — é a parte que
-depende de você:
+### Conflito float × MP4
 
-- **Fase 1** — importar um WAV 32-bit float estéreo e ver a waveform na
-  timeline, redesenhando ao dar zoom. Conferir no painel que o formato
-  detectado aparece como "32-bit float".
-- **Fase 2** — ajustar o offset, salvar o projeto, fechar, reabrir: a waveform
-  volta na posição ajustada.
-- **Fase 3** — depois do item 1 acima: exportar e conferir com `ffprobe` que a
-  trilha saiu como `pcm_f32le`, com os canais e o sample rate originais.
-  Confirmar também o aviso no caso float + `.mp4`.
-- **Fase 4** — definir trim (inclusive múltiplos ranges) e conferir que o áudio
-  acompanha o corte sem drift.
-- **Fase 5** — gravar uma claquete/palma na frente do drone com o mic ligado,
-  rodar o auto-sync e comparar o offset detectado com o real. **Reportar o erro
-  medido em ms.** Se a banda automática pegar vento em vez das pás, desligar
-  `auto_band` e usar a banda fixa.
+Exportando o mesmo material para `.mp4`, o log traz **antes** de escrever:
+
+```
+Áudio externo: PCM (f32le) não cabe em .mp4.
+Troque a saída para .mov para preservar o formato. Exportando com AAC.
+```
+
+Nenhuma conversão silenciosa — o requisito central da decisão 7.
+
+### Roundtrip sem perda
+
+O teste `conteudo_do_audio_sobrevive_ao_encode` escreve uma trilha, relê o
+arquivo e compara amostra a amostra: erro máximo **< 1e-6**. Se houvesse
+quantização para inteiro em algum ponto do caminho, o erro seria ordens de
+grandeza maior.
+
+---
+
+## Bugs encontrados ao testar com arquivos reais
+
+Três defeitos que a compilação não pegaria, e que teriam aparecido no primeiro
+uso:
+
+1. **WAV float classificado como formato comprimido.** O symphonia não preenche
+   `sample_format` para streams PCM — a informação está no `CodecType`. O
+   material 32-bit float seria exportado como AAC, silenciosamente, exatamente
+   o que a decisão 7 proíbe. Corrigido em `decode.rs` com `map_codec_type()` e
+   travado por um teste de regressão.
+
+2. **Crash em áudio estéreo.** `frame::Audio::plane_mut::<f32>(0)` é
+   dimensionado em *frames*, não em amostras, e devolvia metade do buffer
+   necessário. Mono passava; qualquer trilha de 2 canais estouraria o índice.
+
+3. **Estouro de índice no render.** `ost_time_bases` tem o tamanho do número de
+   streams de *entrada*, mas a saída ganha um stream a mais quando o áudio
+   externo é embutido. O render morria antes de escrever qualquer frame.
+
+---
+
+## O que ainda depende de você
+
+**Validação da Fase 5 com material real.** O auto-sync foi verificado com sinais
+sintéticos (recupera offsets conhecidos, positivos e negativos, com erro
+< 30 ms), mas nunca viu a vibração de um drone de verdade. O teste que falta:
+
+1. Gravar um clipe com o mic externo ligado, dando uma palma ou claquete na
+   frente do drone.
+2. Importar o vídeo e o áudio, clicar em **Auto-sync audio**.
+3. Comparar o offset detectado com o real e anotar o erro em ms.
+
+Se a banda automática travar no vento em vez das hélices, a confiança exibida
+cai — nesse caso, desligar `auto_band` e usar a banda fixa (150–900 Hz).
+
+**Validação da interface.** Os testes cobrem a lógica, não o desenho: vale
+conferir a waveform na timeline, o slider e o selo de preservação de formato
+com o programa aberto.
 
 ---
 
@@ -89,40 +118,43 @@ depende de você:
 
 Registradas também no anexo do [PROMPT-MESTRE.md](PROMPT-MESTRE.md).
 
-1. **`export.rs` dividido em dois.** A lógica pura (buffer, offset, trim,
-   silêncio) ficou em `src/core/audio/export.rs`, testável sem ffmpeg; o encode
-   e o mux em `src/rendering/audio_export.rs`. Motivo: `gyroflow-core` não
-   depende de ffmpeg e não deve passar a depender.
+1. **`export.rs` dividido em dois.** Lógica pura (buffer, offset, trim,
+   silêncio) em `src/core/audio/export.rs`, testável sem ffmpeg; encode e mux em
+   `src/rendering/audio_export.rs`. `gyroflow-core` não depende de ffmpeg e não
+   deve passar a depender.
 
-2. **Decode com `symphonia`, não com o ffmpeg do projeto.** Mesma razão: manter
-   o core livre de ffmpeg. `symphonia` é Rust puro, já estava no `Cargo.lock` via
-   rodio, e cobre WAV/PCM float além de AAC/MP3/FLAC.
+2. **Decode com `symphonia`, não com o ffmpeg do projeto.** Mesma razão.
+   É Rust puro, já estava no `Cargo.lock` via rodio, e cobre WAV/PCM float além
+   de AAC/MP3/FLAC.
 
 3. **Container sugerido no conflito float×MP4: `.mov`.** Já é o container de
    ProRes/DNxHD/CineForm no seletor de exportação, e `App.qml:729` já traz a
-   mensagem oficial recomendando `.mov`. MKV segue funcionando para quem digitar
-   a extensão, mas não foi exposto na UI.
+   mensagem oficial recomendando `.mov`.
 
-4. **`IMUData` usa `[f64;3]`**, não `[f32;3]` (verificado em `telemetry-parser`
-   rev `77a3b81`, `src/util.rs:289-294`). O áudio chega em `f32`: a conversão é
-   explícita no `gyro_envelope`.
+4. **O fork do `ffmpeg-next` não precisou ser modificado.** `add_stream`,
+   `avcodec_alloc_context3` e `encoder().audio()` são as mesmas APIs públicas
+   que o `AudioTranscoder` já usa (`ffmpeg_audio.rs:17-46`). Resolve o item 3(a)
+   da Fase 0 e elimina o risco de aumento de escopo.
 
-5. **A taxa de amostragem do gyro é derivada dos timestamps** dentro do
-   `gyro_envelope`, já que não há campo pronto no core. Para alinhar as séries
-   não é preciso reamostrar o gyro: a grade temporal vem do áudio.
+5. **`IMUData` usa `[f64;3]`**, não `[f32;3]` (`telemetry-parser` rev `77a3b81`,
+   `src/util.rs:289-294`).
+
+6. **A taxa de amostragem do gyro é derivada dos timestamps** dentro do
+   `gyro_envelope`. Para alinhar as séries não é preciso reamostrar o gyro: a
+   grade temporal vem do áudio.
 
 ---
 
 ## Riscos ainda em aberto
 
 - **Deriva de clock.** Gravador e câmera têm clocks independentes; em clipes
-  longos um único offset pode não bastar. Só aparece em teste com material real.
-  Se acontecer, a saída é estimar também um fator de resample.
+  longos um único offset pode não bastar. Só aparece com material real. Se
+  acontecer, a saída é estimar também um fator de resample.
 - **Gimbal mecânico.** Se o sensor estiver isolado, a vibração das pás chega
-  atenuada ao gyro e a confiança do auto-sync cai. A UI já sinaliza confiança
-  abaixo de 30%.
-- **Áudio desativado quando a velocidade do vídeo muda** (`rendering/mod.rs:446`,
+  atenuada ao gyro e a confiança do auto-sync cai. A interface já sinaliza
+  confiança abaixo de 30%.
+- **Áudio desativado quando a velocidade do vídeo muda** (`rendering/mod.rs`,
   comportamento pré-existente). O áudio externo herda essa limitação.
-- **O trim de precisão de sample não reusa o `AudioTranscoder`.** Como montamos
-  o buffer inteiro, o caminho é outro — o que é bom para a precisão, mas
-  significa que os dois caminhos de áudio precisam ser mantidos em paralelo.
+- **Dois caminhos de áudio em paralelo.** O trim de precisão de sample não
+  reusa o `AudioTranscoder` — montamos o buffer inteiro. É bom para a precisão,
+  mas os dois caminhos precisam ser mantidos.
