@@ -42,6 +42,7 @@ Item {
 
     function redrawChart(): void { chart.update(); keyframes.item.update(); }
     function getKeyframesView(): TimelineKeyframesView { return keyframes.item; }
+    function getAudioWaveform(): TimelineAudioWaveform { return audioWaveform; }
 
     function getTimestampUs(): real {
         return vid.timestamp * 1000;
@@ -347,6 +348,26 @@ Item {
                     a7.checked = chart.getAxisVisible(7);
                     a8.checked = chart.getAxisVisible(8);
                 }
+            }
+
+            // Lane da forma de onda do áudio externo. Ocupa a faixa inferior da
+            // timeline e só aparece quando há uma trilha importada, para não
+            // roubar altura do gráfico do gyro no uso normal.
+            TimelineAudioWaveform {
+                id: audioWaveform;
+                objectName: "timelineAudioWaveform";
+                visibleAreaLeft: root.visibleAreaLeft;
+                visibleAreaRight: root.visibleAreaRight;
+                anchors.left: parent.left;
+                anchors.right: parent.right;
+                anchors.bottom: parent.bottom;
+                anchors.bottomMargin: (root.fullScreen || window.isMobileLayout? 0 : 5) * dpiScale;
+                height: hasAudio? Math.min(parent.height * 0.3, 60 * dpiScale) : 0;
+                visible: hasAudio;
+                theme: style;
+                vscale: 1.0;
+                durationMs: root.durationMs;
+                opacity: root.trimActive? 0.9 : 1.0;
             }
 
             Loader {

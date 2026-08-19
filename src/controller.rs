@@ -26,6 +26,7 @@ use crate::util;
 use crate::wrap_simple_method;
 use crate::rendering::VideoProcessor;
 use crate::ui::components::TimelineGyroChart::TimelineGyroChart;
+use crate::ui::components::TimelineAudioWaveform::TimelineAudioWaveform;
 use crate::ui::components::TimelineKeyframesView::TimelineKeyframesView;
 use crate::ui::components::FrequencyGraph::FrequencyGraph;
 use crate::qt_gpu::qrhi_undistort;
@@ -61,6 +62,18 @@ pub struct Controller {
     set_of_method: qt_method!(fn(&self, v: u32)),
     start_autosync: qt_method!(fn(&mut self, timestamps_fract: String, sync_params: String, mode: String)),
     update_chart: qt_method!(fn(&self, chart: QJSValue, series: String) -> bool),
+
+    // ---- Áudio externo (feature de sincronização de áudio) ----
+    /// Importa um arquivo de áudio e entrega a trilha decodificada à lane da waveform.
+    import_external_audio: qt_method!(fn(&mut self, url: QUrl, waveform: QJSValue)),
+    /// Remove a trilha importada.
+    clear_external_audio: qt_method!(fn(&mut self, waveform: QJSValue)),
+    /// Resumo do formato da trilha carregada (ex.: `"48000 Hz, 2 ch, 32-bit float"`).
+    get_external_audio_info: qt_method!(fn(&self) -> QString),
+    /// Caminho da trilha carregada, ou string vazia.
+    get_external_audio_path: qt_method!(fn(&self) -> QString),
+    /// Emitido quando uma trilha é carregada ou removida.
+    external_audio_changed: qt_signal!(),
     update_frequency_graph: qt_method!(fn(&self, graph: QJSValue, idx: usize, ts: f64, sr: f64, fft_size: usize)),
     update_keyframes_view: qt_method!(fn(&self, kfview: QJSValue)),
     rolling_shutter_estimated: qt_signal!(rolling_shutter: f64),
@@ -306,6 +319,13 @@ pub struct Controller {
     preview_pipeline: Arc<AtomicUsize>,
 
     ongoing_computations: BTreeSet<u64>,
+
+    /// Trilha de áudio externa importada pelo usuário.
+    ///
+    /// Vive no controller (e não no `StabilizationManager`) enquanto a feature
+    /// não precisa dela durante a estabilização: na Fase 1 o áudio só é
+    /// desenhado. A Fase 3 leva o buffer para o pipeline de exportação.
+    pub external_audio: Option<gyroflow_core::audio::AudioTrack>,
 
     pub stabilizer: Arc<StabilizationManager>,
 }
@@ -1476,6 +1496,61 @@ impl Controller {
     wrap_simple_method!(set_imu_bias, bx: f64, by: f64, bz: f64; recompute; chart_data_changed);
     wrap_simple_method!(recompute_gyro,; recompute; chart_data_changed);
     wrap_simple_method!(set_device, v: i32);
+
+    // ---------- Áudio externo ----------
+
+    /// Decodifica o arquivo escolhido e entrega a trilha à lane da waveform.
+    ///
+    /// O decode roda na thread da UI de propósito: mesmo um WAV de vários
+    /// minutos leva uma fração de segundo, e assim o resultado (ou o erro) já
+    /// está disponível quando o método retorna, sem o aparato de callback que os
+    /// carregamentos de vídeo precisam.
+    fn import_external_audio(&mut self, url: QUrl, waveform: QJSValue) {
+        let url = util::qurl_to_encoded(url);
+
+        match gyroflow_core::audio::decode::decode_file(&url) {
+            Ok(track) => {
+                ::log::info!("Áudio externo importado: {} ({})", url, track.format_summary());
+
+                if let Some(item) = waveform.to_qobject::<TimelineAudioWaveform>() {
+                    let item = unsafe { &mut *item.as_ptr() };
+                    item.set_track(Some(track.clone()));
+                }
+                self.external_audio = Some(track);
+                self.external_audio_changed();
+            }
+            Err(e) => {
+                ::log::error!("Falha ao importar áudio externo {}: {}", url, e);
+                self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+            }
+        }
+    }
+
+    /// Remove a trilha importada e limpa a lane.
+    fn clear_external_audio(&mut self, waveform: QJSValue) {
+        if let Some(item) = waveform.to_qobject::<TimelineAudioWaveform>() {
+            let item = unsafe { &mut *item.as_ptr() };
+            item.set_track(None);
+        }
+        self.external_audio = None;
+        self.external_audio_changed();
+    }
+
+    /// Resumo do formato da trilha, para a interface exibir o que foi detectado.
+    fn get_external_audio_info(&self) -> QString {
+        match &self.external_audio {
+            Some(track) => QString::from(track.format_summary()),
+            None => QString::default(),
+        }
+    }
+
+    /// Caminho da trilha carregada, em forma legível.
+    fn get_external_audio_path(&self) -> QString {
+        match &self.external_audio {
+            Some(track) => QString::from(gyroflow_core::filesystem::display_url(&track.path)),
+            None => QString::default(),
+        }
+    }
 
     fn get_org_duration_ms   (&self) -> f64 { self.stabilizer.params.read().duration_ms }
     fn get_scaled_duration_ms(&self) -> f64 { self.stabilizer.params.read().get_scaled_duration_ms() }

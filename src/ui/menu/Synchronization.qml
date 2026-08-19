@@ -408,5 +408,75 @@ MenuItem {
             checked: true;
             onCheckedChanged: controller.show_optical_flow = checked;
         }
+
+        // ---- Áudio externo ----
+        // Importa uma trilha gravada em separado (DJI Mic e similares) para
+        // alinhá-la ao vídeo. A waveform aparece como uma lane na timeline.
+        Hr { }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("External audio");
+            width: parent.width;
+
+            Column {
+                width: parent.width;
+                spacing: 6 * dpiScale;
+
+                FileDialog {
+                    id: audioFileDialog;
+                    property var extensions: ["wav", "m4a", "mp3", "flac", "aac", "mp4"];
+                    title: qsTr("Choose an audio file");
+                    nameFilters: [qsTr("Audio files") + " (*.wav *.m4a *.mp3 *.flac *.aac *.mp4)"];
+                    type: "audio";
+                    onAccepted: {
+                        const waveform = window.videoArea.timeline.getAudioWaveform();
+                        controller.import_external_audio(audioFileDialog.selectedFile, waveform);
+                    }
+                }
+
+                Button {
+                    text: audioInfo.text? qsTr("Replace audio file") : qsTr("Import external audio");
+                    icon.name: "video";
+                    width: parent.width;
+                    onClicked: audioFileDialog.open2();
+                }
+
+                BasicText {
+                    id: audioInfo;
+                    width: parent.width;
+                    wrapMode: Text.WordWrap;
+                    leftPadding: 0;
+                    // Mostra o formato detectado: é assim que o usuário confirma
+                    // que o 32-bit float foi reconhecido como tal.
+                    text: controller.get_external_audio_info();
+                    visible: !!text;
+                    Connections {
+                        target: controller;
+                        function onExternal_audio_changed() {
+                            audioInfo.text = controller.get_external_audio_info();
+                            audioPath.text = controller.get_external_audio_path();
+                        }
+                    }
+                }
+                BasicText {
+                    id: audioPath;
+                    width: parent.width;
+                    wrapMode: Text.WrapAnywhere;
+                    leftPadding: 0;
+                    font.pixelSize: 11 * dpiScale;
+                    opacity: 0.6;
+                    text: controller.get_external_audio_path();
+                    visible: !!text;
+                }
+
+                Button {
+                    text: qsTr("Remove audio");
+                    width: parent.width;
+                    visible: !!audioInfo.text;
+                    onClicked: controller.clear_external_audio(window.videoArea.timeline.getAudioWaveform());
+                }
+            }
+        }
     }
 }
