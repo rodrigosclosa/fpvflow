@@ -38,6 +38,30 @@ MenuItem {
     /// Whether a track is loaded. Controls the visibility of almost everything here.
     readonly property bool hasAudio: !!audioInfo.text;
 
+    /// Translated name of a sample format. The core returns a stable key so the
+    /// label can be localized here instead of shipping English to every language.
+    function formatLabel(key: string): string {
+        switch (key) {
+            case "f32": return qsTr("32-bit float");
+            case "s32": return qsTr("32-bit int");
+            case "s24": return qsTr("24-bit int");
+            case "s16": return qsTr("16-bit int");
+            case "u8":  return qsTr("8-bit");
+            default:    return qsTr("compressed");
+        }
+    }
+
+    /// Detected format, as one translatable sentence rather than concatenated
+    /// fragments - word order differs between languages.
+    function formatSummary(json: string): string {
+        if (!json) return "";
+        const info = JSON.parse(json);
+        return qsTr("%1 Hz, %2 channels, %3")
+               .arg(info.sample_rate)
+               .arg(info.channels)
+               .arg(root.formatLabel(info.source_format));
+    }
+
     /// Drops the prepared audio so the next play rebuilds it.
     ///
     /// The offset is baked into a temporary file (the player cannot shift a
