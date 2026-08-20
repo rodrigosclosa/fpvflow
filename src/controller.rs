@@ -1578,6 +1578,10 @@ impl Controller {
         let url = url.to_string();
         let url_for_log = url.clone();
 
+        // macOS sandboxes files picked through a dialog: without this the open
+        // fails and nothing is loaded (see load_video, which does the same).
+        filesystem::start_accessing_url(&url, false);
+
         let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, res: Result<gyroflow_core::audio::AudioTrack, String>| {
             this.external_audio_loading = false;
             this.external_audio_loading_changed();
@@ -1623,6 +1627,9 @@ impl Controller {
         if let Some(item) = waveform.to_qobject::<TimelineAudioWaveform>() {
             let item = unsafe { &mut *item.as_ptr() };
             item.set_track(None);
+        }
+        if let Some(track) = &self.external_audio {
+            filesystem::stop_accessing_url(&track.path, false);
         }
         self.external_audio = None;
         self.external_audio_changed();

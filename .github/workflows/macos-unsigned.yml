@@ -1,0 +1,72 @@
+# Personal-fork convenience: produces an unsigned macOS build for testing,
+# without the Apple certificates the official Release workflow requires.
+# Not intended for an upstream pull request.
+
+name: macOS (unsigned)
+
+on:
+  push:
+    branches: [external-audio-sync]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Gyroflow for macOS (unsigned)
+    # macos-14 runners are Apple Silicon, same image the official workflow uses.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-unsigned-gyroflow-0
+
+      - name: Dependencies cache
+        id: extcache
+        uses: actions/cache@v4
+        with:
+          path: '${{ github.workspace }}/ext/'
+          key: macos-unsigned-gyroflow-ext-0
+
+      - name: Prepare Vulkan SDK
+        uses: johnnynunez/setup-vulkan-sdk@v1
+        with:
+          vulkan-query-version: 1.4.304.1
+          vulkan-components: Vulkan-Headers
+          vulkan-use-cache: true
+
+      # The cached target dir can hold a qml-video-rs built against a different
+      # Qt or MDK, which fails to link. Same step as the official workflow.
+      - name: Force qml-video-rs rebuild
+        run: |
+          rm -rf ${{ github.workspace }}/target/*/deploy/build/qml-video-rs*
+          rm -rf ${{ github.workspace }}/target/deploy/build/qml-video-rs*
+
+      - uses: extractions/setup-just@v2
+
+      - name: Build Gyroflow
+        env:
+          # Empty fingerprint skips code signing; DONT_BUILD_DMG skips the .dmg,
+          # which is only worth building once the app is signed.
+          SIGNING_FINGERPRINT: ''
+          DONT_BUILD_DMG: 'true'
+        run: |
+          just install-deps
+          just deploy universal
+
+      - name: Package the app
+        run: |
+          cd ${{ github.workspace }}/_deployment/_binaries/mac
+          # Zip preserves the bundle structure and the executable bit, which
+          # upload-artifact alone does not.
+          zip -qry ../Gyroflow-mac-unsigned.zip Gyroflow.app
+
+      - name: Save binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gyroflow-macos-unsigned
+          path: ${{ github.workspace }}/_deployment/_binaries/Gyroflow-mac-unsigned.zip
+          if-no-files-found: error
