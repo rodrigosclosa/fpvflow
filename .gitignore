@@ -14,3 +14,5 @@ gyroflow.log
 resources/camera_presets
 *.exe
 .qmlls.ini
+# Gerado e apagado pelo build.rs; nao deve ser versionado.
+ui.qrc
