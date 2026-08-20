@@ -88,6 +88,7 @@ Rectangle {
     property alias vidInfo: vidInfo.item;
     property alias videoArea: videoArea;
     property alias motionData: motionData.item;
+    property alias externalAudio: externalAudio.item;
     property alias lensProfile: lensProfile.item;
     property alias outputFile: outputFile;
     property alias sync: sync.item;
@@ -178,6 +179,10 @@ Rectangle {
             Hr { id: lensProfileHr; }
             ItemLoader { id: motionData; sourceComponent: Component {
                 Menu.MotionData { }
+            } }
+            Hr { id: motionDataHr; }
+            ItemLoader { id: externalAudio; sourceComponent: Component {
+                Menu.ExternalAudio { }
             } }
         }
 
@@ -759,9 +764,10 @@ Rectangle {
         return {
             "output": exportSettings.item.getExportOptions(),
             "synchronization": sync.item.getSettings(),
-            // Trilha de áudio externa: caminho, offset e preferência de
-            // preservação de formato. Projetos sem esta chave abrem normalmente.
-            "audio_sync": sync.item.getAudioSyncSettings(),
+            // Trilha de áudio externa: caminho, offset, preferência de
+            // preservação de formato e parâmetros da detecção de banda.
+            // Projetos sem esta chave abrem normalmente.
+            "audio_sync": externalAudio.item.getSettings(),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate

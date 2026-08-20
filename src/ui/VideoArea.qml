@@ -142,6 +142,9 @@ Item {
                 window.stab.loadGyroflow(obj);
                 window.advanced.loadGyroflow(obj);
                 window.sync.loadGyroflow(obj);
+                // Depois do sync: o áudio externo precisa que o vídeo já esteja
+                // carregado para posicionar a waveform na timeline.
+                if (window.externalAudio) window.externalAudio.loadGyroflow(obj);
                 window.lensProfile.loadGyroflow(obj);
                 Qt.callLater(window.exportSettings.loadGyroflow, obj);
 
