@@ -289,6 +289,124 @@ pub fn gyro_envelope(gyro: &[(f64, [f64; 3])], target_rate_hz: f32, params: &Fea
     envelope
 }
 
+// ---------------------------------------------------------------------------
+// Modo "onset": alinhamento pelo início do movimento
+// ---------------------------------------------------------------------------
+//
+// O método da banda das pás precisa de giroscópio bruto em alta taxa. Câmeras
+// como o DJI O4P não expõem isso — entregam apenas algumas dezenas de
+// quaternions já integrados e suavizados, tipicamente abaixo de 1 Hz. A
+// vibração das hélices simplesmente não existe nesse sinal.
+//
+// Mas há outro evento presente nos dois lados: o **início do movimento**. Quando
+// o drone decola, o gyro registra rotação e o microfone registra os motores
+// acelerando. Correlacionar essas duas curvas de "quanto está acontecendo"
+// funciona mesmo com taxa baixa, porque o evento dura segundos, não
+// milissegundos.
+
+/// Envelope de energia total do áudio, sem filtro de banda.
+///
+/// Diferente de [`audio_envelope`], que isola a banda das pás, aqui interessa a
+/// energia do sinal inteiro: o que marca a decolagem é o volume geral subindo,
+/// não uma frequência específica.
+///
+/// Devolve o envelope e sua taxa em Hz.
+pub fn audio_energy_envelope(mono: &[f32], sample_rate: u32, target_rate_hz: f32) -> (Vec<f32>, f32) {
+    if mono.is_empty() || sample_rate == 0 || target_rate_hz <= 0.0 {
+        return (Vec::new(), 0.0);
+    }
+
+    let samples_per_bucket = (sample_rate as f32 / target_rate_hz).round().max(1.0) as usize;
+    let bucket_count = mono.len() / samples_per_bucket;
+    if bucket_count < 2 {
+        return (Vec::new(), 0.0);
+    }
+
+    let mut envelope = Vec::with_capacity(bucket_count);
+    for bucket in 0..bucket_count {
+        let from = bucket * samples_per_bucket;
+        let to = (from + samples_per_bucket).min(mono.len());
+        let energy: f32 = mono[from..to].iter().map(|v| v * v).sum();
+        envelope.push(log_compress(energy / (to - from) as f32));
+    }
+
+    (envelope, sample_rate as f32 / samples_per_bucket as f32)
+}
+
+/// Envelope de intensidade de movimento do drone.
+///
+/// Usa a magnitude da velocidade angular **sem** passa-alta: aqui o movimento
+/// intencional é exatamente o que interessa, não o ruído a ser removido.
+///
+/// `target_rate_hz` deve ser a taxa do envelope de áudio, para que as duas
+/// curvas fiquem na mesma base de tempo.
+pub fn gyro_motion_envelope(gyro: &[(f64, [f64; 3])], target_rate_hz: f32) -> Vec<f32> {
+    if gyro.len() < 2 || target_rate_hz <= 0.0 {
+        return Vec::new();
+    }
+
+    let first_ms = gyro[0].0;
+    let last_ms = gyro[gyro.len() - 1].0;
+    let duration_s = (last_ms - first_ms) / 1000.0;
+    if duration_s <= 0.0 {
+        return Vec::new();
+    }
+
+    let bucket_count = (duration_s as f32 * target_rate_hz).round().max(2.0) as usize;
+    let bucket_duration_s = duration_s / bucket_count as f64;
+
+    // Reamostra por interpolação: com poucas amostras (dezenas de quaternions
+    // para dezenas de segundos), agrupar por índice deixaria buckets vazios.
+    let mut envelope = Vec::with_capacity(bucket_count);
+    for bucket in 0..bucket_count {
+        let t_ms = first_ms + (bucket as f64 + 0.5) * bucket_duration_s * 1000.0;
+
+        // Mesmo padrão de interpolação linear por timestamp usado em
+        // synchronization/optimsync.rs:40-51.
+        let idx = gyro.partition_point(|(t, _)| *t < t_ms);
+        let magnitude = if idx == 0 {
+            let v = gyro[0].1;
+            (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+        } else if idx >= gyro.len() {
+            let v = gyro[gyro.len() - 1].1;
+            (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+        } else {
+            let (t0, v0) = gyro[idx - 1];
+            let (t1, v1) = gyro[idx];
+            let span = t1 - t0;
+            let f = if span > 0.0 { (t_ms - t0) / span } else { 0.0 };
+            let m0 = (v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2]).sqrt();
+            let m1 = (v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2]).sqrt();
+            m0 + (m1 - m0) * f
+        };
+
+        envelope.push(log_compress(magnitude as f32));
+    }
+
+    envelope
+}
+
+/// Realça as transições de um envelope, descartando o nível absoluto.
+///
+/// O alinhamento por onset não compara "quão alto" está cada sinal — as escalas
+/// de um microfone e de um giroscópio não têm relação —, e sim **quando cada um
+/// muda**. Derivar e manter só os aumentos isola esses instantes: a decolagem
+/// aparece como um pico em ambos.
+///
+/// Conhecido em processamento de áudio como *spectral flux* de meia-onda.
+pub fn onset_strength(envelope: &[f32]) -> Vec<f32> {
+    if envelope.len() < 2 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(envelope.len());
+    out.push(0.0);
+    for i in 1..envelope.len() {
+        // Só aumentos: quedas de energia não marcam início de evento.
+        out.push((envelope[i] - envelope[i - 1]).max(0.0));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +496,65 @@ mod tests {
         let first: f32 = env[..mid].iter().sum::<f32>() / mid as f32;
         let second: f32 = env[mid..].iter().sum::<f32>() / (env.len() - mid) as f32;
         assert!(second > first, "primeira={first}, segunda={second}");
+    }
+
+    #[test]
+    fn onset_marca_o_instante_da_subida() {
+        // Envelope que salta na posição 5 e depois cai.
+        let env = vec![0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 1.0, 1.0];
+        let onset = onset_strength(&env);
+
+        // O pico do onset tem que estar exatamente na transição.
+        let (peak_idx, _) = onset.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        assert_eq!(peak_idx, 5, "onset={onset:?}");
+
+        // A queda em 8 não pode virar pico: só aumentos interessam.
+        assert_eq!(onset[8], 0.0);
+    }
+
+    #[test]
+    fn envelope_de_movimento_funciona_com_poucas_amostras() {
+        // O caso do DJI O4P: ~30 quaternions para ~45 s de vídeo. O drone fica
+        // parado e depois se move.
+        let gyro: Vec<(f64, [f64; 3])> = (0..30)
+            .map(|i| {
+                let t_ms = i as f64 * 1500.0; // uma amostra a cada 1,5 s
+                let v = if i < 15 { 0.001 } else { 0.5 }; // parado, depois movendo
+                (t_ms, [v, 0.0, 0.0])
+            })
+            .collect();
+
+        // Mesmo pedindo 15 Hz a partir de 0,66 Hz de dados, a interpolação
+        // preenche a grade sem deixar buracos.
+        let env = gyro_motion_envelope(&gyro, 15.0);
+        assert!(env.len() > 100, "tamanho={}", env.len());
+
+        let mid = env.len() / 2;
+        let antes: f32 = env[..mid].iter().sum::<f32>() / mid as f32;
+        let depois: f32 = env[mid..].iter().sum::<f32>() / (env.len() - mid) as f32;
+        assert!(depois > antes + 1.0, "antes={antes}, depois={depois}");
+
+        // E o onset marca a transição perto do meio.
+        let onset = onset_strength(&env);
+        let (peak, _) = onset.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap();
+        let erro_relativo = (peak as f32 - mid as f32).abs() / env.len() as f32;
+        assert!(erro_relativo < 0.15, "pico em {peak}, esperado perto de {mid}");
+    }
+
+    #[test]
+    fn energia_do_audio_ignora_a_banda() {
+        let sr = 8000;
+        // Silêncio e depois som: o que importa é o nível, não a frequência.
+        let mut signal = vec![0.0f32; sr as usize];
+        signal.extend(tone(300.0, sr, 1.0, |_| 0.8));
+
+        let (env, rate) = audio_energy_envelope(&signal, sr, 15.0);
+        assert!(!env.is_empty() && rate > 0.0);
+
+        let mid = env.len() / 2;
+        assert!(env[mid + 5] > env[mid - 5] + 1.0, "a subida deveria aparecer");
     }
 
     #[test]

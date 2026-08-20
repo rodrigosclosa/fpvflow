@@ -1648,8 +1648,9 @@ impl Controller {
             highpass_hz: highpass_hz as f32,
         };
 
-        // Lado do áudio: opera sobre o downmix de análise, nunca sobre o áudio
-        // de export.
+        // O método da banda das pás é o preferido, mas depende de giroscópio
+        // bruto em alta taxa. A escolha entre ele e o alinhamento por início de
+        // movimento é feita mais abaixo, depois de saber o que a câmera oferece.
         let (audio_env, env_rate) = audio_envelope(&track.mono_analysis, track.sample_rate, &params);
         if audio_env.is_empty() || env_rate <= 0.0 {
             return QString::default();
@@ -1657,7 +1658,7 @@ impl Controller {
 
         // Lado do gyro: as amostras vêm do file_metadata, porque o campo
         // `raw_imu` do GyroSource costuma estar vazio (ver gyro_source/mod.rs:689).
-        let gyro_samples: Vec<(f64, [f64; 3])> = {
+        let mut gyro_samples: Vec<(f64, [f64; 3])> = {
             let gyro = self.stabilizer.gyro.read();
             let md = gyro.file_metadata.read();
             gyro.raw_imu(&md)
@@ -1665,20 +1666,90 @@ impl Controller {
                 .filter_map(|x| x.gyro.map(|g| (x.timestamp_ms, g)))
                 .collect()
         };
+
+        // Nem toda câmera entrega giroscópio bruto. O DJI O4P, por exemplo,
+        // reporta `contains_raw_gyro: false` e só fornece quaternions já
+        // integrados. Nesse caso a velocidade angular é derivada da diferença
+        // entre orientações consecutivas — que é justamente o que o gyro mede.
         if gyro_samples.len() < 2 {
+            let gyro = self.stabilizer.gyro.read();
+            let quats = &gyro.quaternions;
+            if quats.len() >= 2 {
+                gyro_samples = quats
+                    .iter()
+                    .zip(quats.iter().skip(1))
+                    .filter_map(|((t0, q0), (t1, q1))| {
+                        let dt = (*t1 - *t0) as f64 / 1_000_000.0; // µs -> s
+                        if dt <= 0.0 {
+                            return None;
+                        }
+                        // A rotação relativa entre as duas orientações, convertida
+                        // para vetor axis-angle e dividida pelo tempo, dá a
+                        // velocidade angular em rad/s.
+                        let delta = q0.inverse() * q1;
+                        let v = delta.scaled_axis() / dt;
+                        Some((*t1 as f64 / 1000.0, [v[0], v[1], v[2]]))
+                    })
+                    .collect();
+
+                ::log::info!(
+                    "Auto-sync de áudio: sem giroscópio bruto; velocidade angular derivada de {} quaternions",
+                    quats.len()
+                );
+            }
+        }
+
+        if gyro_samples.len() < 2 {
+            ::log::warn!("Auto-sync de áudio: nenhum dado de giroscópio disponível (nem bruto, nem quaternions)");
             return QString::default();
         }
 
-        let gyro_env = gyro_envelope(&gyro_samples, env_rate, &params);
-        if gyro_env.is_empty() {
-            return QString::default();
-        }
+        // Taxa real com que a câmera fornece os dados de movimento.
+        let gyro_rate = {
+            let span_s = (gyro_samples[gyro_samples.len() - 1].0 - gyro_samples[0].0) / 1000.0;
+            if span_s > 0.0 { gyro_samples.len() as f64 / span_s } else { 0.0 }
+        };
 
-        let result = cross_correlate(&audio_env, &gyro_env, env_rate);
+        // A banda das pás começa em ~150 Hz; por Nyquist, o gyro precisa
+        // amostrar acima de 300 Hz para enxergá-la. Abaixo disso — o caso de
+        // câmeras que só entregam quaternions integrados, como o DJI O4P — a
+        // vibração não existe no sinal, e correlacioná-la seria comparar ruído.
+        // Nesses casos alinhamos pelo INÍCIO DO MOVIMENTO: a decolagem aparece
+        // como um salto de energia tanto no gyro quanto no áudio.
+        const MIN_GYRO_RATE_FOR_BLADE_BAND: f64 = 300.0;
+        let use_onset = gyro_rate < MIN_GYRO_RATE_FOR_BLADE_BAND;
+
+        let (result, method) = if use_onset {
+            use gyroflow_core::audio::features::{audio_energy_envelope, gyro_motion_envelope, onset_strength};
+
+            // Taxa baixa o suficiente para os poucos pontos de movimento
+            // preencherem a grade, e alta o suficiente para dar precisão útil.
+            let onset_rate = 20.0f32;
+
+            let (audio_energy, actual_rate) =
+                audio_energy_envelope(&track.mono_analysis, track.sample_rate, onset_rate);
+            let motion = gyro_motion_envelope(&gyro_samples, actual_rate.max(1.0));
+
+            if audio_energy.is_empty() || motion.is_empty() {
+                ::log::warn!("Auto-sync de áudio: envelopes de movimento vazios");
+                return QString::default();
+            }
+
+            let audio_onset = onset_strength(&audio_energy);
+            let gyro_onset = onset_strength(&motion);
+
+            (cross_correlate(&audio_onset, &gyro_onset, actual_rate), "início de movimento")
+        } else {
+            let gyro_env = gyro_envelope(&gyro_samples, env_rate, &params);
+            if gyro_env.is_empty() {
+                return QString::default();
+            }
+            (cross_correlate(&audio_env, &gyro_env, env_rate), "banda das pás")
+        };
 
         ::log::info!(
-            "Auto-sync de áudio: offset={:.3}s, confiança={:.3} (envelopes: áudio={}, gyro={} a {:.2} Hz)",
-            result.offset_seconds, result.confidence, audio_env.len(), gyro_env.len(), env_rate
+            "Auto-sync de áudio [{}]: offset={:.3}s, confiança={:.3} (gyro a {:.1} Hz, {} amostras)",
+            method, result.offset_seconds, result.confidence, gyro_rate, gyro_samples.len()
         );
 
         // O valor calculado é apenas o ponto de partida: o usuário continua
@@ -1690,6 +1761,10 @@ impl Controller {
         QString::from(serde_json::json!({
             "offset_seconds": result.offset_seconds,
             "confidence": result.confidence,
+            // A interface informa qual método foi usado: com câmeras que só dão
+            // quaternions, o alinhamento é pelo início do movimento e a precisão
+            // é menor que a do método da banda das pás.
+            "method": if use_onset { "onset" } else { "blade_band" },
         }).to_string())
     }
 

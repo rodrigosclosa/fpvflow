@@ -146,7 +146,16 @@ MenuItem {
             // Confiança baixa quase sempre significa que a vibração das pás não
             // chegou ao gyro (gimbal isolando) ou que o mic estava longe do drone.
             autoSyncResult.isWeak = r.confidence < 0.3;
+
+            // Com câmeras que só entregam quaternions (DJI O4P e afins) não há
+            // vibração de hélice no sinal do gyro, e o alinhamento é feito pelo
+            // início do movimento — menos preciso, então vale dizer qual foi.
+            const method = r.method === "onset"
+                         ? qsTr("aligned by start of movement")
+                         : qsTr("aligned by propeller vibration");
+
             autoSyncResult.text = qsTr("Confidence: %1%").arg((r.confidence * 100).toFixed(0))
+                                + " — " + method
                                 + (autoSyncResult.isWeak? " — " + qsTr("weak match, check manually") : "");
         }
     }
