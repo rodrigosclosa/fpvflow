@@ -767,7 +767,8 @@ Rectangle {
             // Trilha de áudio externa: caminho, offset, preferência de
             // preservação de formato e parâmetros da detecção de banda.
             // Projetos sem esta chave abrem normalmente.
-            "audio_sync": externalAudio.item.getSettings(),
+            // O ItemLoader é assíncrono: no arranque o item ainda pode ser null.
+            "audio_sync": externalAudio.item? externalAudio.item.getSettings() : ({ }),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate
