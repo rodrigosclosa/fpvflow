@@ -142,6 +142,9 @@ Item {
                 window.stab.loadGyroflow(obj);
                 window.advanced.loadGyroflow(obj);
                 window.sync.loadGyroflow(obj);
+                // After sync: external audio needs the video loaded already to place
+                // the waveform on the timeline.
+                if (window.externalAudio) window.externalAudio.loadGyroflow(obj);
                 window.lensProfile.loadGyroflow(obj);
                 Qt.callLater(window.exportSettings.loadGyroflow, obj);
 
@@ -320,6 +323,29 @@ Item {
         }
     }
     property Modal externalSdkModal: null;
+
+    /// Starts playback, preparing the external audio track first.
+    ///
+    /// The offset is baked into a temporary file rather than applied by the
+    /// player, so the file has to be written before there is anything to hear.
+    /// Writing it on play instead of on every slider move keeps the adjustment
+    /// instant and only pays the cost when someone is actually going to listen.
+    function playWithExternalAudio(): void {
+        if (controller.external_audio_preparing) return;
+        if (controller.get_external_audio_url()) {
+            controller.prepare_external_audio_preview();
+        } else {
+            vid.play();
+        }
+    }
+
+    Connections {
+        target: controller;
+        function onExternal_audio_preview_ready(url: string): void {
+            if (url) vid.setExternalAudio(url, 0.0);
+            vid.play();
+        }
+    }
 
     function loadFile(url: url, skip_detection: bool, queueJobId: int): void {
         let filename = filesystem.get_filename(url);
@@ -998,7 +1024,7 @@ Item {
                         }
                     }
                     Button {
-                        onClicked: { if (vid.playing) vid.pause(); else vid.play(); }
+                        onClicked: { if (vid.playing) vid.pause(); else root.playWithExternalAudio(); }
                         tooltip: vid.playing? qsTr("Pause") : qsTr("Play");
                         iconName: vid.playing? "pause" : "play";
                         transparentOnMobile: true;
