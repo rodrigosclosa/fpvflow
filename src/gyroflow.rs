@@ -66,13 +66,16 @@ fn entry() {
     log_panics::init();
 
     cpp!(unsafe [] {
+        // The settings directory stays "Gyroflow" on purpose: this is a fork, and
+        // sharing it means lens profiles and preferences carry over instead of
+        // starting empty.
         qApp->setOrganizationName("Gyroflow");
         qApp->setOrganizationDomain("gyroflow.xyz");
-        qApp->setApplicationName("Gyroflow");
+        qApp->setApplicationName("FPVFlow");
 
-        QMessageLogger("", 0, "main").debug(QLoggingCategory("gyroflow")) << "Qt version:" << qVersion();
+        QMessageLogger("", 0, "main").debug(QLoggingCategory("fpvflow")) << "Qt version:" << qVersion();
     });
-    ::log::debug!("Gyroflow {}", util::get_version());
+    ::log::debug!("FPVFlow {} (fork of Gyroflow)", util::get_version());
 
     let mut open_file = String::new();
     let mut open_preset = String::new();
