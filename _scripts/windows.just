@@ -259,8 +259,8 @@ deploy:
     xcopy /Y "$CargoTarget\mdk.dll"                                      "$TargetDir\"
     xcopy /Y "$CargoTarget\mdk-braw.dll"                                 "$TargetDir\"
     xcopy /Y "$CargoTarget\mdk-r3d.dll"                                  "$TargetDir\"
-    echo F | xcopy /Y "$CargoTarget\gyroflow.exe"                        "$TargetDir\Gyroflow.exe"
-    xcopy /Y "$ProjectDir\_deployment\windows\Gyroflow_with_console.bat" "$TargetDir\"
+    echo F | xcopy /Y "$CargoTarget\gyroflow.exe"                        "$TargetDir\FPVFlow.exe"
+    xcopy /Y "$ProjectDir\_deployment\windows\FPVFlow_with_console.bat" "$TargetDir\"
     # xcopy /Y /E "$ProjectDir\resources\camera_presets\*"                 "$TargetDir\camera_presets\"
     mkdir "$TargetDir\camera_presets\" -Force
     echo F | xcopy /Y "$ProjectDir\resources\camera_presets\profiles.cbor.gz"  "$TargetDir\camera_presets\profiles.cbor.gz"
@@ -286,7 +286,7 @@ deploy:
         Invoke-WebRequest -URI "https://api.gyroflow.xyz/sdk/shaderc_shared.dll" -OutFile "$TargetDir\shaderc_shared.dll"
     }
 
-    7z a $ProjectDir\_deployment\_binaries\Gyroflow-{{NameSuffix}}.zip $TargetDir\*
+    7z a $ProjectDir\_deployment\_binaries\FPVFlow-{{NameSuffix}}.zip $TargetDir\*
 
 [no-cd]
 bundle:
@@ -336,7 +336,7 @@ bundle:
     # MsixPackagingTool.exe create-package --template installer_msix.xml
 
     # Build .msix
-    Remove-Item -Path "..\_binaries\Gyroflow-{{NameSuffix}}.msix" -ErrorAction SilentlyContinue
+    Remove-Item -Path "..\_binaries\FPVFlow-{{NameSuffix}}.msix" -ErrorAction SilentlyContinue
     mkdir -Force "bundle"
     cp -Recurse -Force $TargetDir\* bundle\
     cp -Recurse -Force Assets bundle\Assets
@@ -355,8 +355,8 @@ bundle:
     makepri.exe createconfig /cf priconfig.xml /dq en-us
     makepri.exe new /pr bundle\Assets\ /cf priconfig.xml /mn bundle\AppxManifest.xml /of bundle\resources.pri /o
 
-    makeappx.exe pack /d bundle /p ..\_binaries\Gyroflow-{{NameSuffix}}.msix
-    signtool.exe sign /f msix_signing_key.pfx /p $Env:MS_STORE_SIGNING_PASS /fd sha256 ..\_binaries\Gyroflow-{{NameSuffix}}.msix
+    makeappx.exe pack /d bundle /p ..\_binaries\FPVFlow-{{NameSuffix}}.msix
+    signtool.exe sign /f msix_signing_key.pfx /p $Env:MS_STORE_SIGNING_PASS /fd sha256 ..\_binaries\FPVFlow-{{NameSuffix}}.msix
 
     # To bundle
     # makeappx.exe bundle /d bundle /p Gyroflow.msixbundle

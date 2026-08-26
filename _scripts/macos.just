@@ -10,7 +10,7 @@ DistributionProvisioning      := ProjectDir / "_deployment/mac/Gyroflow_mac_app_
 # DistributionCertificateSHA    := "D125BE70B690030172EB74A828C10C1AE77FDE9A"
 # DistributionProvisioning      := ProjectDir / "_deployment/mac/Gyroflow_mac_developer_id.provisionprofile"
 
-AppBundle := ProjectDir / "_deployment/_binaries/mac/Gyroflow.app"
+AppBundle := ProjectDir / "_deployment/_binaries/mac/FPVFlow.app"
 
 export CPATH := if os() == "macos" {
     if path_exists(`xcode-select --print-path` + "/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include") == "true" {
@@ -179,7 +179,7 @@ deploy *param:
     fi
 
     ICON=$PROJECT_DIR/resources/icon_1024_mac.png
-    ICON_OUT=$PROJECT_DIR/_deployment/mac/Gyroflow.app/Contents/Resources/Images.xcassets/AppIcon.appiconset
+    ICON_OUT=$PROJECT_DIR/_deployment/mac/FPVFlow.app/Contents/Resources/Images.xcassets/AppIcon.appiconset
     sips -z 16 16      $ICON --out $ICON_OUT/icon_16x16.png
     sips -z 32 32      $ICON --out $ICON_OUT/icon_16x16@2x.png
     sips -z 32 32      $ICON --out $ICON_OUT/icon_32x32.png
@@ -192,20 +192,20 @@ deploy *param:
     sips -z 1024 1024  $ICON --out $ICON_OUT/icon_512x512@2x.png
     mkdir -p $ICON_OUT/../AppIcon.iconset/
     cp -f $ICON_OUT/*.png $ICON_OUT/../AppIcon.iconset/
-    iconutil -c icns $ICON_OUT/../AppIcon.iconset --output $PROJECT_DIR/_deployment/mac/Gyroflow.app/Contents/Resources/AppIcon.icns
+    iconutil -c icns $ICON_OUT/../AppIcon.iconset --output $PROJECT_DIR/_deployment/mac/FPVFlow.app/Contents/Resources/AppIcon.icns
     rm -rf $ICON_OUT/../AppIcon.iconset
 
     if [ "{{param}}" == "local" ] || [ "{{param}}" == "universal" ]; then
-        mkdir -p "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/camera_presets/"
-        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS"
-        cp -Rf "$PROJECT_DIR/_deployment/mac/Gyroflow.app"    "$PROJECT_DIR/_deployment/_binaries/mac/"
-        cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/"
-        strip "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/gyroflow"
-        cp -Rf "$PROJECT_DIR/target/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/" || true
-        cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/"
-        # cp -Rf "$PROJECT_DIR/resources/camera_presets"        "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/"
-        # rm -rf "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/camera_presets/.git"
-        cp -f "$PROJECT_DIR/resources/camera_presets/profiles.cbor.gz" "$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/camera_presets/profiles.cbor.gz"
+        mkdir -p "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/camera_presets/"
+        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS"
+        cp -Rf "$PROJECT_DIR/_deployment/mac/FPVFlow.app"    "$PROJECT_DIR/_deployment/_binaries/mac/"
+        cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/"
+        strip "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/gyroflow"
+        cp -Rf "$PROJECT_DIR/target/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/" || true
+        cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/"
+        # cp -Rf "$PROJECT_DIR/resources/camera_presets"        "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/"
+        # rm -rf "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/camera_presets/.git"
+        cp -f "$PROJECT_DIR/resources/camera_presets/profiles.cbor.gz" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/camera_presets/profiles.cbor.gz"
     fi
 
     cp -af "$QT_DIR/lib/QtCore.framework"                     "$CARGO_TARGET/../Frameworks/"
@@ -234,7 +234,7 @@ deploy *param:
     cp -af "$QT_DIR/lib/QtWidgets.framework"                  "$CARGO_TARGET/../Frameworks/"
 
     if [ "{{param}}" == "local" ] || [ "{{param}}" == "universal" ]; then
-        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/qml"
+        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/qml"
     fi
 
     mkdir -p "$CARGO_TARGET/QtCore/"
@@ -299,7 +299,7 @@ deploy *param:
     cp -f $QT_DIR/qml/QtQuick/Effects/qmldir                                                          "$CARGO_TARGET/QtQuick/Effects/" || true
 
     if [ "{{param}}" == "local" ] || [ "{{param}}" == "universal" ]; then
-        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/PlugIns"
+        CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/PlugIns"
     fi
     mkdir -p "$CARGO_TARGET/iconengines/"
     mkdir -p "$CARGO_TARGET/imageformats/"
@@ -310,25 +310,25 @@ deploy *param:
     cp -f $QT_DIR/plugins/platforms/libqcocoa.dylib                                                   "$CARGO_TARGET/platforms/"
 
     if [ "{{param}}" == "local" ] || [ "{{param}}" == "universal" ]; then
-        xattr -c $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Info.plist
-        xattr -c $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Resources/AppIcon.icns
-        rm -f $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/.empty
-        rm -f $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/PlugIns/.empty
-        rm -f $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/.empty
-        rm -f $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/Frameworks/mdk.framework/Versions/A/libass.dylib
+        xattr -c $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Info.plist
+        xattr -c $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/AppIcon.icns
+        rm -f $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/.empty
+        rm -f $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/PlugIns/.empty
+        rm -f $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/.empty
+        rm -f $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/mdk.framework/Versions/A/libass.dylib
 
         if [ "$SIGNING_FINGERPRINT" != "" ]; then
             # Certificate needs to be "Developer ID Application"
 
-            find $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents \( -name "*.dylib" -or -path "*/Versions/A/*" \) -and ! \( \
+            find $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents \( -name "*.dylib" -or -path "*/Versions/A/*" \) -and ! \( \
                 -path "*/Headers/*" -or -path "*/A/Resources/*" -or -name "CodeResources" -or -name "module.modulemap" \) -type f | sort | xargs -r \
                 codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT
 
-            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app/Contents/MacOS/gyroflow
+            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/gyroflow
 
-            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app
+            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app
 
-            codesign -vvvv --deep --verify $PROJECT_DIR/_deployment/_binaries/mac/Gyroflow.app
+            codesign -vvvv --deep --verify $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app
         fi
 
         if [ -z "$DONT_BUILD_DMG" ]; then
@@ -340,16 +340,16 @@ deploy *param:
                 sudo pkill -9 XProtect >/dev/null || true
                 while pgrep XProtect; do sleep 3; done;
 
-                hdiutil create "$PROJECT_DIR/_deployment/_binaries/Gyroflow-mac-universal.dmg" -volname "Gyroflow v{{ProjectVersion}}" -fs HFS+ -srcfolder "$PROJECT_DIR/_deployment/_binaries/mac/" -ov -format UDZO -imagekey zlib-level=9 || true
+                hdiutil create "$PROJECT_DIR/_deployment/_binaries/FPVFlow-mac-universal.dmg" -volname "FPVFlow v{{ProjectVersion}}" -fs HFS+ -srcfolder "$PROJECT_DIR/_deployment/_binaries/mac/" -ov -format UDZO -imagekey zlib-level=9 || true
 
-                if [ -f "$PROJECT_DIR/_deployment/_binaries/Gyroflow-mac-universal.dmg" ]; then
+                if [ -f "$PROJECT_DIR/_deployment/_binaries/FPVFlow-mac-universal.dmg" ]; then
                     break
                 fi
             done
 
             if [ "$SIGNING_FINGERPRINT" != "" ]; then
-                codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT "$PROJECT_DIR/_deployment/_binaries/Gyroflow-mac-universal.dmg"
-                codesign -vvvv --deep --verify "$PROJECT_DIR/_deployment/_binaries/Gyroflow-mac-universal.dmg"
+                codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT "$PROJECT_DIR/_deployment/_binaries/FPVFlow-mac-universal.dmg"
+                codesign -vvvv --deep --verify "$PROJECT_DIR/_deployment/_binaries/FPVFlow-mac-universal.dmg"
             fi
         fi
     fi
@@ -362,7 +362,7 @@ bundle *param:
     : "${PROJECT_DIR:=$(cd "{{ProjectDir}}"; pwd -P)}"
     export PATH="/usr/libexec/:$PATH"
 
-    cp -f "$PROJECT_DIR/_deployment/mac/Gyroflow.app/Contents/Info.plist" {{AppBundle}}/Contents/Info.plist
+    cp -f "$PROJECT_DIR/_deployment/mac/FPVFlow.app/Contents/Info.plist" {{AppBundle}}/Contents/Info.plist
     cp -f "$PROJECT_DIR/target/deploy/gyroflow" "{{AppBundle}}/Contents/MacOS/"
 
     if ! [ -z "$GITHUB_RUN_NUMBER" ]; then
@@ -414,9 +414,9 @@ bundle *param:
 
     actool {{ProjectDir}}/_deployment/ios/Resources/Images.xcassets --compile {{AppBundle}}/Contents --platform macosx --minimum-deployment-target 10.15 --app-icon AppIcon --output-partial-info-plist {{AppBundle}}/../AppIcon.plist
 
-    dsymutil {{AppBundle}}/Contents/MacOS/gyroflow -o {{AppBundle}}/../Gyroflow.app.dSYM
+    dsymutil {{AppBundle}}/Contents/MacOS/gyroflow -o {{AppBundle}}/../FPVFlow.app.dSYM
     mkdir -p {{AppBundle}}/../Symbols
-    xcrun symbols -noTextInSOD -noDaemon -arch all -symbolsPackageDir {{AppBundle}}/../Symbols {{AppBundle}}/../Gyroflow.app.dSYM
+    xcrun symbols -noTextInSOD -noDaemon -arch all -symbolsPackageDir {{AppBundle}}/../Symbols {{AppBundle}}/../FPVFlow.app.dSYM
 
     if [ -z "$SIGN_KEY" ] || [ -z "$PKG_SIGN_KEY" ] || [ -z "$PROVISIONING_PROFILE" ]; then
         SIGN_KEY="{{DistributionCertificateSHA}}"

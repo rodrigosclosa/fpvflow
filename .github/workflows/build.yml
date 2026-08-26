@@ -1,0 +1,181 @@
+name: Build
+
+# Produces unsigned desktop packages for Windows, macOS and Linux, and publishes
+# them as a GitHub release when a tag is pushed.
+#
+# Nothing here is code-signed: that needs an Apple Developer certificate and a
+# Windows signing key, neither of which this project has. Users get the usual
+# first-run warnings - see the release notes below.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a draft release with the artifacts'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022,  type: windows, name: 'Windows x64' }
+          - { os: macos-14,      type: macos,   name: 'macOS (universal)' }
+          - { os: ubuntu-latest, type: linux,   name: 'Linux x64' }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.type }}-fpvflow-0
+
+      - name: Dependencies cache
+        uses: actions/cache@v4
+        with:
+          path: '${{ github.workspace }}/ext/'
+          key: ${{ matrix.type }}-fpvflow-ext-0
+
+      - name: Prepare Vulkan SDK
+        uses: johnnynunez/setup-vulkan-sdk@v1
+        with:
+          vulkan-query-version: 1.4.304.1
+          vulkan-components: Vulkan-Headers
+          vulkan-use-cache: true
+
+      # qml-video-rs wraps C++ that the cache does not track properly, so a stale
+      # object file survives a dependency bump and the build links the old code.
+      - name: Force qml-video-rs rebuild (UNIX)
+        if: ${{ matrix.type != 'windows' }}
+        run: |
+          rm -rf ${{ github.workspace }}/target/*/deploy/build/qml-video-rs*
+          rm -rf ${{ github.workspace }}/target/deploy/build/qml-video-rs*
+      - name: Force qml-video-rs rebuild (Win)
+        if: ${{ matrix.type == 'windows' }}
+        run: |
+          rm -r -force ${{ github.workspace }}/target/deploy/build/qml-video-rs* -ErrorAction SilentlyContinue
+          rm -r -force ${{ github.workspace }}/target/x86_64-pc-windows-msvc/deploy/build/qml-video-rs* -ErrorAction SilentlyContinue
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Build (Windows)
+        if: ${{ matrix.type == 'windows' }}
+        run: |
+          just install-deps
+          just deploy
+
+      - name: Build (macOS)
+        if: ${{ matrix.type == 'macos' }}
+        env:
+          # No Apple certificate: the app ships unsigned and the .dmg is skipped,
+          # since an unsigned disk image only adds a second Gatekeeper prompt.
+          SIGNING_FINGERPRINT: ''
+          DONT_BUILD_DMG: 'true'
+          FORCE_QT_VERSION: 6.7.3
+        run: |
+          just install-deps
+          just deploy universal
+
+      - name: Build (Linux)
+        if: ${{ matrix.type == 'linux' }}
+        run: just deploy docker
+
+      - name: Package (Windows)
+        if: ${{ matrix.type == 'windows' }}
+        run: |
+          cd ${{ github.workspace }}/_deployment/_binaries
+          7z a FPVFlow-windows64.zip win64/*
+
+      - name: Package (macOS)
+        if: ${{ matrix.type == 'macos' }}
+        run: |
+          cd ${{ github.workspace }}/_deployment/_binaries
+          # Zip the bundle preserving symlinks and resource forks, or the .app
+          # will not launch after download.
+          ditto -c -k --sequesterRsrc --keepParent mac/FPVFlow.app FPVFlow-mac-universal.zip
+
+      - name: Package (Linux)
+        if: ${{ matrix.type == 'linux' }}
+        run: |
+          cd ${{ github.workspace }}/_deployment/_binaries
+          ls -la
+          # The docker target already produces the AppImage; just make sure the
+          # name matches what the release step expects.
+          for f in *.AppImage; do [ -e "$f" ] && mv "$f" FPVFlow-linux64.AppImage; done || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FPVFlow-${{ matrix.type }}
+          path: |
+            ${{ github.workspace }}/_deployment/_binaries/FPVFlow-*.zip
+            ${{ github.workspace }}/_deployment/_binaries/FPVFlow-*.AppImage
+          if-no-files-found: warn
+
+  release:
+    name: Publish release
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List what will be published
+        run: ls -laR artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: FPVFlow ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            artifacts/FPVFlow-*.zip
+            artifacts/FPVFlow-*.AppImage
+          body: |
+            FPVFlow is a fork of [Gyroflow](https://github.com/gyroflow/gyroflow)
+            with features aimed at FPV pilots, starting with external audio
+            synchronization.
+
+            ## Downloads
+
+            | Platform | File |
+            |---|---|
+            | Windows x64 | `FPVFlow-windows64.zip` |
+            | macOS (Apple Silicon + Intel) | `FPVFlow-mac-universal.zip` |
+            | Linux x64 | `FPVFlow-linux64.AppImage` |
+
+            ## These builds are not signed
+
+            **macOS:** the first launch is blocked. Right-click the app and choose
+            Open, or run:
+
+            ```
+            xattr -dr com.apple.quarantine /Applications/FPVFlow.app
+            ```
+
+            **Windows:** SmartScreen shows a warning. Click "More info" and then
+            "Run anyway".
+
+            Signing needs an Apple Developer certificate and a Windows code
+            signing key, which this project does not have.
+
+            ## Settings are shared with Gyroflow
+
+            Lens profiles and preferences are read from the same directory
+            Gyroflow uses, so an existing install carries over. Both apps can be
+            installed side by side.
