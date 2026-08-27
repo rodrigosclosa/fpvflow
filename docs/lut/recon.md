@@ -165,16 +165,20 @@ Existem dois slots `reserved1`/`reserved2` (`mod.rs:144-145` e espelhos) que
 
 ## 3. Texturas 3D
 
-**Não confirmado.** Hoje o projeto não cria nenhuma textura 3D em nenhum backend,
-então não há precedente para copiar. O buffer `coeffs` (binding 2,
-`wgpu_undistort.wgsl:56`) carrega coeficientes de interpolação e cores de
-drawing — um LUT 3D pediria binding próprio, mexendo nos bind group layouts
-(`wgpu.rs:317-340`).
+**Não há precedente no projeto** — nenhum backend cria textura 3D hoje, então não
+há código para copiar. O buffer `coeffs` (binding 2, `wgpu_undistort.wgsl:56`)
+carrega coeficientes de interpolação e cores de drawing; um LUT 3D pede binding
+próprio, mexendo nos bind group layouts (`wgpu.rs:317-340`).
 
-Isto fica como **risco aberto**: a viabilidade de textura 3D com sampler linear
-em cada backend precisa ser verificada na Fase 2, e o plano de contingência
-(textura 2D "tiled", que é como a maioria dos players faz) pode ser necessário
-para OpenCL.
+O wgpu 30 (`src/core/Cargo.toml:88`) tem `TextureDimension::D3`, e o padrão de
+criação a seguir está em `wgpu_interop.rs:50-64`. Para OpenCL a garantia de
+`image3d_t` com sampler linear **não foi verificada**.
+
+**Decisão tomada:** `src/core/color/lut/gpu.rs` monta os **dois** layouts a
+partir dos mesmos dados — volume nativo `N×N×N` e tiled 2D (fatias de azul lado a
+lado, com a interpolação no eixo azul feita à mão no shader). Assim nenhum
+backend fica bloqueado à espera da verificação, e a escolha do layout não muda o
+resultado, só como o shader lê.
 
 ## 4. Export: cor e bit depth
 
