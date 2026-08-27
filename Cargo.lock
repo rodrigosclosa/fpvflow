@@ -3442,7 +3442,7 @@ dependencies = [
 [[package]]
 name = "qml-video-rs"
 version = "0.1.0"
-source = "git+https://github.com/rodrigosclosa/qml-video-rs.git?rev=a645496#a64549630525f6f01a6bdd18c64770aa751299c8"
+source = "git+https://github.com/rodrigosclosa/qml-video-rs.git?rev=badf6f2#badf6f2c322baee8249fc8c348d7db22b688d738"
 dependencies = [
  "cpp",
  "cpp_build",

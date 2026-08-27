@@ -324,7 +324,7 @@ Item {
     }
     property Modal externalSdkModal: null;
 
-    /// Starts playback, preparing the external audio track first.
+    /// Starts playback, attaching the external audio track first.
     ///
     /// The offset is baked into a temporary file rather than applied by the
     /// player, so the file has to be written before there is anything to hear.
@@ -342,10 +342,29 @@ Item {
     Connections {
         target: controller;
         function onExternal_audio_preview_ready(url: string): void {
-            if (url) vid.setExternalAudio(url, 0.0);
+            if (!url) { vid.play(); return; }
+
+            // MDK only demuxes an external track during prepare(), so the track
+            // is staged and the video reloaded: setUrl() then runs the one
+            // sequence that works - setMedia(), track, prepare(). Attaching it
+            // to the loaded player leaves it registered but never opened, and
+            // re-preparing in place drops the playback range and locks the UI.
+            if (root.attachedAudioUrl !== url) {
+                root.pendingAudioSeek = vid.timestamp;
+                root.attachedAudioUrl = url;
+                vid.stageExternalAudio(url, 0.0);
+                controller.load_video(controller.get_input_file_url(), vid);
+                return;
+            }
             vid.play();
         }
     }
+
+    /// Preview file currently attached to the player, to avoid reloading the
+    /// video when the track has not actually changed.
+    property string attachedAudioUrl: "";
+    /// Playhead to restore after a reload that attached the audio track, or -1.
+    property real pendingAudioSeek: -1;
 
     function loadFile(url: url, skip_detection: bool, queueJobId: int): void {
         let filename = filesystem.get_filename(url);
@@ -763,6 +782,18 @@ Item {
                     property bool errorShown: false;
                     onMetadataChanged: {
                         if (vid.videoWidth > 0) {
+                            // A reload that attached the audio track: put the
+                            // playhead back where it was and start playing, so
+                            // the round trip is invisible apart from the pause.
+                            if (root.pendingAudioSeek >= 0) {
+                                const position = root.pendingAudioSeek;
+                                root.pendingAudioSeek = -1;
+                                Qt.callLater(function() {
+                                    vid.seekToTimestamp(position, true);
+                                    vid.play();
+                                });
+                                return;
+                            }
                             // Trigger seek to buffer the video frames
                             if (vid.duration == 0) {
                                 vid.play();

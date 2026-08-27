@@ -68,8 +68,12 @@ MenuItem {
     /// track), and that file is written on play - adjusting the slider only has
     /// to invalidate it, which keeps the adjustment instant.
     function invalidatePlayerAudio(): void {
-        const vid = window.videoArea && window.videoArea.vid;
-        if (vid && vid.clearExternalAudio) vid.clearExternalAudio();
+        const area = window.videoArea;
+        if (!area) return;
+        // Forget which file is attached, so the next play reloads with the
+        // rewritten one instead of assuming the player is already current.
+        area.attachedAudioUrl = "";
+        if (area.vid && area.vid.clearExternalAudio) area.vid.clearExternalAudio();
     }
     function getAudioWaveform(): var {
         return window.videoArea && window.videoArea.timeline
