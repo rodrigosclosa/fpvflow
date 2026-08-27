@@ -22,8 +22,10 @@
 //! unnoticed on neutral images and is obvious on anything saturated - hence
 //! [`Lut::sample`] and the identity test that pins the convention down.
 
+pub mod gpu;
 pub mod parser;
 
+pub use gpu::{build_tiled, build_volume, LutLayout, LutTexture};
 pub use parser::{parse_cube, parse_cube_str, LutParseError};
 
 /// Table payload, either a per-channel curve or a full color cube.
