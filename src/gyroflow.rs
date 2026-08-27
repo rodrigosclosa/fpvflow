@@ -65,10 +65,11 @@ fn entry() {
     util::set_android_context();
     log_panics::init();
 
+    // The settings directory stays "Gyroflow" on purpose: this is a fork, and
+    // sharing it means lens profiles and preferences carry over instead of
+    // starting empty. (Comments must stay outside the cpp! block - rust-cpp
+    // parses it textually at build time and chokes on them.)
     cpp!(unsafe [] {
-        // The settings directory stays "Gyroflow" on purpose: this is a fork, and
-        // sharing it means lens profiles and preferences carry over instead of
-        // starting empty.
         qApp->setOrganizationName("Gyroflow");
         qApp->setOrganizationDomain("gyroflow.xyz");
         qApp->setApplicationName("FPVFlow");
