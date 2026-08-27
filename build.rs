@@ -104,6 +104,12 @@ fn main() {
     }
     // config.define("QT_QML_DEBUG", None);
     println!("cargo:rerun-if-changed=src/qt_gpu/qrhi_undistort.cpp");
+    // Declaring any rerun-if-changed turns off Cargo's default of watching the
+    // whole package, and cpp_build parses this file (see the build() call at the
+    // end). Without it, editing a cpp! body leaves the generated library holding
+    // the old closure hashes and the build fails with "not found in the
+    // library's rust-cpp metadata".
+    println!("cargo:rerun-if-changed=src/gyroflow.rs");
 
     if target_os == "ios" {
         println!("cargo:rerun-if-changed=_deployment/ios/qml_plugins.cpp");
