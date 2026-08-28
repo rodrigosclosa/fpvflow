@@ -2213,7 +2213,10 @@ impl Controller {
             this.updates_available(QString::from(version), QString::from(changelog))
         });
         core::run_threaded(move || {
-            if let Ok(Ok(body)) = ureq::get("https://api.github.com/repos/gyroflow/gyroflow/releases").call().map(|x| x.into_body().read_to_string()) {
+            // This fork's own releases, not the upstream ones. FPVFlow numbers
+            // from 1.0.0 while Gyroflow is at 1.6.3, so checking upstream offered
+            // an "update" to a different application on every launch.
+            if let Ok(Ok(body)) = ureq::get("https://api.github.com/repos/rodrigosclosa/fpvflow/releases").call().map(|x| x.into_body().read_to_string()) {
                 if let Ok(v) = serde_json::from_str(&body) as serde_json::Result<serde_json::Value> {
                     if let Some(v) = v.as_array() {
                         for itm in v {

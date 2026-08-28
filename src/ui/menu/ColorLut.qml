@@ -20,7 +20,9 @@ import "../components/"
 MenuItem {
     id: root;
     text: qsTr("Color");
-    iconName: "stars5";
+    // "lens" rather than "stars5": that one is the lens-profile rating
+    // icon, and it rendered as five stars sitting on top of the button.
+    iconName: "lens";
     objectName: "colorlut";
     innerItem.enabled: window.videoArea.vid.loaded;
 
@@ -191,7 +193,7 @@ MenuItem {
 
     Button {
         text: root.hasLut? qsTr("Replace LUT") : qsTr("Load LUT");
-        iconName: "stars5";
+        iconName: "file-empty";
         width: parent.width;
         onClicked: lutFileDialog.open2();
     }

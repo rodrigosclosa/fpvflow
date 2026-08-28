@@ -635,18 +635,10 @@ Rectangle {
             Qt.callLater(controller.recompute_threaded);
         }
         function openUpdatePage(): void {
-            if (Qt.platform.os == "android") {
-                Qt.openUrlExternally("https://play.google.com/store/apps/details?id=xyz.gyroflow");
-            } else if (Qt.platform.os == "ios") {
-                Qt.openUrlExternally("https://apps.apple.com/us/app/gyroflow/id6447994244");
-            } else if (Qt.platform.os == "osx" && isStorePackage) {
-                Qt.openUrlExternally("https://apps.apple.com/us/app/gyroflow/id6447994244");
-            } else if (Qt.platform.os == "windows" && isStorePackage) {
-                // https://apps.microsoft.com/store/detail/gyroflow/9NZG7T0JCG9H
-                Qt.openUrlExternally("ms-windows-store://pdp/?ProductId=9NZG7T0JCG9H");
-            } else {
-                Qt.openUrlExternally("https://github.com/gyroflow/gyroflow/releases");
-            }
+            // FPVFlow is only distributed from its own releases page - it is in no
+            // app store, and the upstream store links would send the user to a
+            // different application.
+            Qt.openUrlExternally("https://github.com/rodrigosclosa/fpvflow/releases");
         }
         function onUpdates_available(version: string, changelog: string): void {
             const heading = "<p align=\"center\">" + qsTr("There's a newer version available: %1.").arg("<b>" + version + "</b>") + "</p>\n\n";
