@@ -69,10 +69,14 @@ fn entry() {
     // sharing it means lens profiles and preferences carry over instead of
     // starting empty. (Comments must stay outside the cpp! block - rust-cpp
     // parses it textually at build time and chokes on them.)
-    cpp!(unsafe [] {
+    let version = QString::from(env!("CARGO_PKG_VERSION"));
+    cpp!(unsafe [version as "QString"] {
         qApp->setOrganizationName("Gyroflow");
         qApp->setOrganizationDomain("gyroflow.xyz");
         qApp->setApplicationName("FPVFlow");
+        // So QML can show it through Qt.application.version - the welcome panel
+        // prints this next to the upstream version it forked from.
+        qApp->setApplicationVersion(version);
 
         QMessageLogger("", 0, "main").debug(QLoggingCategory("fpvflow")) << "Qt version:" << qVersion();
     });

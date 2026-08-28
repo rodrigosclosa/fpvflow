@@ -165,6 +165,20 @@ Rectangle {
                         anchors.centerIn: parent;
                     }
                 }
+                // What this is and where it came from. The fork keeps the
+                // upstream version it branched from visible on purpose: the lens
+                // profiles, the .gyroflow format and the docs all still line up
+                // with Gyroflow 1.6.3, so someone reading a bug report needs both
+                // numbers.
+                BasicText {
+                    width: parent.width;
+                    horizontalAlignment: Text.AlignHCenter;
+                    wrapMode: Text.WordWrap;
+                    font.pixelSize: 11 * dpiScale;
+                    opacity: 0.6;
+                    text: qsTr("Gyroflow melhorado para pilotos de FPV") + "\n"
+                        + qsTr("v%1 · baseado no Gyroflow %2").arg(Qt.application.version).arg("1.6.3");
+                }
                 Hr { }
             }
 
