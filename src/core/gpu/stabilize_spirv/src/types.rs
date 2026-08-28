@@ -79,6 +79,8 @@ pub struct KernelParams {
     pub reserved2:                f32, // 16
     pub ewa_coeffs_p:             Vec4, // 16
     pub ewa_coeffs_q:             Vec4, // 16
+    pub color_adjust1:            Vec4, // 16 - exposure_ev, contrast, saturation, temperature
+    pub color_adjust2:            Vec4, // 16 - tint, highlights, shadows, vignette
 }
 
 // #[inline] pub fn fast_floor(x: f32) -> i32 { x as i32 }

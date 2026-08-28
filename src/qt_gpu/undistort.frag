@@ -54,6 +54,8 @@ layout(std140, binding = 2) uniform KernelParams {
     float reserved2;                // 16
     vec4 ewa_coefs_p;               // 16
     vec4 ewa_coefs_q;               // 16
+    vec4 color_adjust1;             // 16 - exposure_ev, contrast, saturation, temperature
+    vec4 color_adjust2;             // 16 - tint, highlights, shadows, vignette
 } params;
 
 LENS_MODEL_FUNCTIONS;
@@ -194,6 +196,67 @@ vec4 apply_color_lut(vec4 pixel) {
     return vec4(mix(pixel.rgb, texture(texLut, uvw).rgb, params.lut_amount), pixel.a);
 }
 
+// Per-pixel color adjustments, applied after the LUT.
+//
+// Must stay in step with apply_color_adjustments in wgpu_undistort.wgsl,
+// opencl_undistort.cl and cpu_undistort.rs - same order, same constants.
+//
+// This path is already 0..1, so unlike the other three there is no
+// max_pixel_value division here.
+vec4 apply_color_adjustments(vec4 pixel, vec2 out_pos) {
+    float exposure_ev = params.color_adjust1.x;
+    float contrast    = params.color_adjust1.y;
+    float saturation  = params.color_adjust1.z;
+    float temperature = params.color_adjust1.w;
+    float tint        = params.color_adjust2.x;
+    float highlights  = params.color_adjust2.y;
+    float shadows     = params.color_adjust2.z;
+    float vignette    = params.color_adjust2.w;
+
+    if (exposure_ev == 0.0 && contrast == 0.0 && saturation == 0.0 && temperature == 0.0 &&
+        tint == 0.0 && highlights == 0.0 && shadows == 0.0 && vignette == 0.0) {
+        return pixel;
+    }
+
+    vec3 c = pixel.rgb;
+
+    if (exposure_ev != 0.0) { c *= pow(2.0, exposure_ev); }
+
+    if (temperature != 0.0 || tint != 0.0) {
+        c.r += temperature * 0.2;
+        c.b -= temperature * 0.2;
+        c.g += tint * 0.2;
+    }
+
+    if (contrast != 0.0) { c = (c - 0.18) * (1.0 + contrast) + 0.18; }
+
+    const vec3 luma_weights = vec3(0.2126, 0.7152, 0.0722);
+
+    if (highlights != 0.0 || shadows != 0.0) {
+        float l = dot(c, luma_weights);
+        float hi_mask = smoothstep(0.5, 1.0, l);
+        float lo_mask = 1.0 - smoothstep(0.0, 0.5, l);
+        c += highlights * hi_mask * 0.5;
+        c += shadows * lo_mask * 0.5;
+    }
+
+    if (saturation != 0.0) {
+        float l = dot(c, luma_weights);
+        c = mix(vec3(l), c, 1.0 + saturation);
+    }
+
+    if (vignette != 0.0) {
+        vec2 size = vec2(float(params.output_width), float(params.output_height));
+        vec2 d = (out_pos / size) - 0.5;
+        d.x *= size.x / max(size.y, 1.0);
+        float corner = length(vec2(0.5 * size.x / max(size.y, 1.0), 0.5));
+        float r = length(d) / max(corner, 0.0001);
+        c *= 1.0 - vignette * smoothstep(0.3, 1.0, r);
+    }
+
+    return vec4(clamp(c, 0.0, 1.0), pixel.a);
+}
+
 void main() {
     vec2 texPos = v_texcoord.xy * vec2(params.output_width, params.output_height) + params.translation2d;
     vec2 outPos = v_texcoord.xy * vec2(params.output_width, params.output_height);
@@ -303,7 +366,7 @@ void main() {
                 // Only when this is real image data - the background is the
                 // user's chosen color and stays ungraded. Before the overlays,
                 // and this branch returns early.
-                fragColor = apply_color_lut(fragColor);
+                fragColor = apply_color_adjustments(apply_color_lut(fragColor), outPos);
             }
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
@@ -312,7 +375,7 @@ void main() {
         }
 
         if ((uv.x >= 0 && uv.x < frame_size.x) && (uv.y >= 0 && uv.y < frame_size.y)) {
-            fragColor = apply_color_lut(texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y)));
+            fragColor = apply_color_adjustments(apply_color_lut(texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y))), outPos);
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
             draw_safe_area(fragColor, outPos.x, outPos.y);

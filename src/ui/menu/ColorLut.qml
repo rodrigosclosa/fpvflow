@@ -43,20 +43,65 @@ MenuItem {
     ///
     /// The internal URL, not the readable path: it is what reopens the file, and
     /// on Android the two are not interchangeable.
+    /// The sliders, by the name the core knows them under. One list drives
+    /// saving, loading and resetting, so the three cannot drift apart.
+    readonly property var adjustmentSliders: ({
+        "exposure":    adjExposure,
+        "contrast":    adjContrast,
+        "saturation":  adjSaturation,
+        "temperature": adjTemperature,
+        "tint":        adjTint,
+        "highlights":  adjHighlights,
+        "shadows":     adjShadows,
+        "vignette":    adjVignette
+    });
+
+    /// Puts every slider back to neutral.
+    function resetAdjustments(): void {
+        for (const name in root.adjustmentSliders) root.adjustmentSliders[name].value = 0;
+        controller.reset_color_adjustments();
+    }
+
     function getSettings(): var {
+        const adjustments = { };
+        let any = false;
+        for (const name in root.adjustmentSliders) {
+            const v = root.adjustmentSliders[name].value;
+            // Only what differs from neutral, so a project with no grading does
+            // not carry eight zeroes.
+            if (v !== 0) { adjustments[name] = v; any = true; }
+        }
+
         const url = controller.get_color_lut_url();
-        return url? { "url": url, "amount": controller.get_color_lut_amount() } : ({ });
+        const out = { };
+        if (url) { out.url = url; out.amount = controller.get_color_lut_amount(); }
+        if (any) out.adjustments = adjustments;
+        return out;
     }
 
     /// Restores from a project. Missing or empty keys leave the panel untouched,
     /// so older projects load unchanged.
     function loadGyroflow(obj: var): void {
         const o = obj.color_lut;
-        if (!o || !o.url) return;
-        controller.load_color_lut_url(o.url);
-        // Before 100% was the only option, so a project without the key means
-        // full strength rather than none.
-        lutAmount.value = o.hasOwnProperty("amount")? +o.amount : 1.0;
+        if (!o) return;
+
+        if (o.url) {
+            controller.load_color_lut_url(o.url);
+            // Before, 100% was the only option, so a project without the key
+            // means full strength rather than none.
+            lutAmount.value = o.hasOwnProperty("amount")? +o.amount : 1.0;
+        }
+
+        // Absent means neutral, and the sliders are reset first so a project
+        // without grading clears whatever the previous clip left behind.
+        root.resetAdjustments();
+        if (o.adjustments) {
+            for (const name in root.adjustmentSliders) {
+                if (o.adjustments.hasOwnProperty(name)) {
+                    root.adjustmentSliders[name].value = +o.adjustments[name];
+                }
+            }
+        }
     }
 
     /// Folder scanned for the library dropdown. Global, not per project.
@@ -207,6 +252,106 @@ MenuItem {
             // Back to the placeholder, otherwise the dropdown keeps naming a LUT
             // that is no longer applied.
             library.currentIndex = 0;
+        }
+    }
+
+    // ---- Adjustments ----
+    // These run after the LUT, on Rec.709 values, so they behave the way a
+    // grading panel does rather than fighting the log curve. Collapsed by
+    // default: the common case is a LUT and nothing else.
+    AdvancedSection {
+        btn.text: qsTr("Adjustments");
+
+        Label {
+            text: qsTr("Exposure");
+            SliderWithField {
+                id: adjExposure;
+                // Stops, so ±2 EV covers ordinary correction without the slider
+                // becoming too coarse to be useful.
+                from: -2; to: 2; value: 0; defaultValue: 0;
+                unit: qsTr(" EV"); precision: 2;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("exposure", value);
+            }
+        }
+        Label {
+            text: qsTr("Contrast");
+            SliderWithField {
+                id: adjContrast;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("contrast", value);
+            }
+        }
+        Label {
+            text: qsTr("Saturation");
+            SliderWithField {
+                id: adjSaturation;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("saturation", value);
+            }
+        }
+        Label {
+            text: qsTr("Temperature");
+            SliderWithField {
+                id: adjTemperature;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("temperature", value);
+            }
+        }
+        Label {
+            text: qsTr("Tint");
+            SliderWithField {
+                id: adjTint;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("tint", value);
+            }
+        }
+        Label {
+            text: qsTr("Highlights");
+            SliderWithField {
+                id: adjHighlights;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("highlights", value);
+            }
+        }
+        Label {
+            text: qsTr("Shadows");
+            SliderWithField {
+                id: adjShadows;
+                from: -1; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("shadows", value);
+            }
+        }
+        Label {
+            text: qsTr("Vignette");
+            SliderWithField {
+                // One-sided: a negative vignette would brighten the corners,
+                // which is not what the control means.
+                id: adjVignette;
+                from: 0; to: 1; value: 0; defaultValue: 0;
+                unit: "%"; precision: 0; scaler: 100.0;
+                width: parent.width;
+                onValueChanged: controller.set_color_adjustment("vignette", value);
+            }
+        }
+
+        Button {
+            text: qsTr("Reset adjustments");
+            iconName: "undo";
+            width: parent.width;
+            onClicked: root.resetAdjustments();
         }
     }
 }

@@ -51,6 +51,8 @@ typedef struct {
     float reserved2;                 // 16
     float4 ewa_coeffs_p;             // 16
     float4 ewa_coeffs_q;             // 16
+    float4 color_adjust1;            // 16 - exposure_ev, contrast, saturation, temperature
+    float4 color_adjust2;            // 16 - tint, highlights, shadows, vignette
 } KernelParams;
 
 #if INTERPOLATION == 2 // Bilinear
@@ -627,6 +629,67 @@ float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global 
     return (float4)(outv.x, outv.y, outv.z, pixel.w);
 }
 
+// Per-pixel color adjustments, applied after the LUT.
+//
+// Must stay in step with apply_color_adjustments in wgpu_undistort.wgsl,
+// undistort.frag and cpu_undistort.rs - same order, same constants. The order is
+// deliberate: exposure, white balance, tone, then saturation last so it acts on
+// the final tones.
+float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelParams *params) {
+    float exposure_ev = params->color_adjust1.x;
+    float contrast    = params->color_adjust1.y;
+    float saturation  = params->color_adjust1.z;
+    float temperature = params->color_adjust1.w;
+    float tint        = params->color_adjust2.x;
+    float highlights  = params->color_adjust2.y;
+    float shadows     = params->color_adjust2.z;
+    float vignette    = params->color_adjust2.w;
+
+    if (exposure_ev == 0.0f && contrast == 0.0f && saturation == 0.0f && temperature == 0.0f &&
+        tint == 0.0f && highlights == 0.0f && shadows == 0.0f && vignette == 0.0f) {
+        return pixel;
+    }
+
+    float3 c = (float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value;
+
+    if (exposure_ev != 0.0f) { c *= pow(2.0f, exposure_ev); }
+
+    if (temperature != 0.0f || tint != 0.0f) {
+        c.x += temperature * 0.2f;
+        c.z -= temperature * 0.2f;
+        c.y += tint * 0.2f;
+    }
+
+    if (contrast != 0.0f) { c = (c - 0.18f) * (1.0f + contrast) + 0.18f; }
+
+    float3 luma_weights = (float3)(0.2126f, 0.7152f, 0.0722f);
+
+    if (highlights != 0.0f || shadows != 0.0f) {
+        float l = dot(c, luma_weights);
+        float hi_mask = smoothstep(0.5f, 1.0f, l);
+        float lo_mask = 1.0f - smoothstep(0.0f, 0.5f, l);
+        c += highlights * hi_mask * 0.5f;
+        c += shadows * lo_mask * 0.5f;
+    }
+
+    if (saturation != 0.0f) {
+        float l = dot(c, luma_weights);
+        c = mix((float3)(l, l, l), c, 1.0f + saturation);
+    }
+
+    if (vignette != 0.0f) {
+        float2 size = (float2)((float)params->output_width, (float)params->output_height);
+        float2 d = (out_pos / size) - 0.5f;
+        d.x *= size.x / fmax(size.y, 1.0f);
+        float corner = length((float2)(0.5f * size.x / fmax(size.y, 1.0f), 0.5f));
+        float r = length(d) / fmax(corner, 0.0001f);
+        c *= 1.0f - vignette * smoothstep(0.3f, 1.0f, r);
+    }
+
+    c = clamp(c, 0.0f, 1.0f) * params->max_pixel_value;
+    return (float4)(c.x, c.y, c.z, pixel.w);
+}
+
 __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstptr, __global const void *params_buf, __global const float *matrices, __global const uchar *drawing, __global const float *mesh_data, __global const float *lut) {
     int buf_x = get_global_id(0);
     int buf_y = get_global_id(1);
@@ -692,14 +755,14 @@ __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstp
                 // the overlays, so drawing and the safe area keep their own
                 // colors. This branch returns early - forgetting it would leave
                 // part of the frame ungraded.
-                final_pix = DATA_CONVERT(apply_color_lut(c1 * alpha + c2 * (1.0f - alpha), lut, LUT_SIZE, params));
+                final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(c1 * alpha + c2 * (1.0f - alpha), lut, LUT_SIZE, params), (float2)(x, y), params));
                 draw_pixel(&final_pix, x, y, false, max(params->width, params->output_width), params, drawing);
                 draw_safe_area(&final_pix, x, y, params);
                 *out_pix = final_pix;
                 return;
             }
 
-            final_pix = DATA_CONVERT(apply_color_lut(sample_input_at(uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params));
+            final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(sample_input_at(uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params), (float2)(x, y), params));
         } else {
             // Background, not image data - the user picked this color, so it is
             // deliberately left ungraded, like the two early returns above.

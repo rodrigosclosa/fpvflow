@@ -49,6 +49,8 @@ struct KernelParams {
     reserved2:                f32, // 16
     ewa_coeffs_p:             vec4<f32>, // 16
     ewa_coeffs_q:             vec4<f32>, // 16
+    color_adjust1:            vec4<f32>, // 16 - exposure_ev, contrast, saturation, temperature
+    color_adjust2:            vec4<f32>, // 16 - tint, highlights, shadows, vignette
 }
 
 @group(0) @binding(0) @fragment var<uniform> params: KernelParams;
@@ -621,6 +623,80 @@ fn apply_color_lut(pixel: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(mix(pixel.rgb, graded, params.lut_amount), pixel.a);
 }
 
+// Per-pixel color adjustments, applied after the LUT.
+//
+// Order is deliberate and matches how a grading panel reads top to bottom:
+// exposure, then white balance, then tone (contrast, highlights, shadows), then
+// saturation last so it acts on the final tones. Reordering changes the result.
+//
+// Everything works on the 0..1 normalized value, so the same constants hold at
+// 8, 10 and 16 bit. Rec.709 luma weights, matching the output the LUT targets.
+fn apply_color_adjustments(pixel: vec4<f32>, out_pos: vec2<f32>) -> vec4<f32> {
+    let exposure_ev = params.color_adjust1.x;
+    let contrast    = params.color_adjust1.y;
+    let saturation  = params.color_adjust1.z;
+    let temperature = params.color_adjust1.w;
+    let tint        = params.color_adjust2.x;
+    let highlights  = params.color_adjust2.y;
+    let shadows     = params.color_adjust2.z;
+    let vignette    = params.color_adjust2.w;
+
+    // Nothing to do: the common case is every slider at its default.
+    if (exposure_ev == 0.0 && contrast == 0.0 && saturation == 0.0 && temperature == 0.0 &&
+        tint == 0.0 && highlights == 0.0 && shadows == 0.0 && vignette == 0.0) {
+        return pixel;
+    }
+
+    var c = pixel.rgb / params.max_pixel_value;
+
+    // Exposure in stops, which is what the number means to a photographer.
+    if (exposure_ev != 0.0) { c *= pow(2.0, exposure_ev); }
+
+    // White balance as a cheap channel tilt: warm pushes red and pulls blue,
+    // tint trades green against magenta. Not a chromatic adaptation transform,
+    // but predictable and monotonic, which is what a slider needs.
+    if (temperature != 0.0 || tint != 0.0) {
+        c.r += temperature * 0.2;
+        c.b -= temperature * 0.2;
+        c.g += tint * 0.2;
+    }
+
+    // Contrast pivots around middle grey so the image does not also brighten.
+    if (contrast != 0.0) { c = (c - 0.18) * (1.0 + contrast) + 0.18; }
+
+    let luma_weights = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+    // Highlights and shadows use smooth masks rather than hard thresholds, so a
+    // moving edge does not band as the mask flips.
+    if (highlights != 0.0 || shadows != 0.0) {
+        let l = dot(c, luma_weights);
+        let hi_mask = smoothstep(0.5, 1.0, l);
+        let lo_mask = 1.0 - smoothstep(0.0, 0.5, l);
+        c += highlights * hi_mask * 0.5;
+        c += shadows * lo_mask * 0.5;
+    }
+
+    // Saturation last, so it acts on the tones the steps above produced.
+    if (saturation != 0.0) {
+        let l = dot(c, luma_weights);
+        c = mix(vec3<f32>(l), c, 1.0 + saturation);
+    }
+
+    // Vignette darkens toward the corners. The radius is aspect-corrected, so a
+    // 16:9 frame gets a circle rather than an ellipse.
+    if (vignette != 0.0) {
+        let size = vec2<f32>(f32(params.output_width), f32(params.output_height));
+        var d = (out_pos / size) - 0.5;
+        d.x *= size.x / max(size.y, 1.0);
+        // Normalized so the corner reaches 1.0 regardless of aspect.
+        let corner = length(vec2<f32>(0.5 * size.x / max(size.y, 1.0), 0.5));
+        let r = length(d) / max(corner, 0.0001);
+        c *= 1.0 - vignette * smoothstep(0.3, 1.0, r);
+    }
+
+    return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * params.max_pixel_value, pixel.a);
+}
+
 fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
     let bg = vec4<f32>(params.background.x, params.background.y, params.background.z, params.background.w) * params.max_pixel_value;
 
@@ -689,6 +765,7 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
             // colors. This branch returns early - forgetting it would leave part
             // of the frame ungraded.
             pixel = apply_color_lut(pixel);
+            pixel = apply_color_adjustments(pixel, p);
             pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);
             pixel = draw_safe_area(pixel, p.x, p.y);
             return vec4<SCALAR>(pixel);
@@ -697,6 +774,7 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
         pixel = sample_input_at(uv, jac);
     }
     pixel = apply_color_lut(pixel);
+    pixel = apply_color_adjustments(pixel, p);
     pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);
     pixel = draw_safe_area(pixel, p.x, p.y);
     return vec4<SCALAR>(pixel);

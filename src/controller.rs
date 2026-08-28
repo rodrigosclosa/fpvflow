@@ -186,6 +186,14 @@ pub struct Controller {
     /// Lists the `.cube` files in a folder, as a JSON array of `{name, url}`.
     list_color_luts: qt_method!(fn(&self, folder_url: QString) -> QString),
 
+    // ---- Color adjustments, applied after the LUT ----
+    /// Sets one adjustment by name: exposure, contrast, saturation, temperature,
+    /// tint, highlights, shadows or vignette.
+    set_color_adjustment: qt_method!(fn(&mut self, name: QString, value: f64)),
+    get_color_adjustment: qt_method!(fn(&self, name: QString) -> f64),
+    /// Resets every adjustment to neutral.
+    reset_color_adjustments: qt_method!(fn(&mut self)),
+
     set_offset: qt_method!(fn(&self, timestamp_us: i64, offset_ms: f64)),
     remove_offset: qt_method!(fn(&self, timestamp_us: i64)),
     clear_offsets: qt_method!(fn(&self)),
@@ -1347,6 +1355,20 @@ impl Controller {
 
     fn get_color_lut_amount(&self) -> f64 {
         self.stabilizer.color_lut_amount() as f64
+    }
+
+    fn set_color_adjustment(&mut self, name: QString, value: f64) {
+        self.stabilizer.set_color_adjustment(&name.to_string(), value as f32);
+        self.request_recompute();
+    }
+
+    fn get_color_adjustment(&self, name: QString) -> f64 {
+        self.stabilizer.color_adjustment(&name.to_string()) as f64
+    }
+
+    fn reset_color_adjustments(&mut self) {
+        self.stabilizer.reset_color_adjustments();
+        self.request_recompute();
     }
 
     fn list_color_luts(&self, folder_url: QString) -> QString {

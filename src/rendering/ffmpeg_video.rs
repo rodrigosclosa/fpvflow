@@ -43,6 +43,14 @@ pub struct EncoderParams<'a> {
     pub frame_rate: Option<Rational>,
     pub time_base: Option<Rational>,
     pub keyframe_distance_s: f64,
+    /// Force the output to be tagged Rec.709.
+    ///
+    /// A conversion LUT turns log footage into Rec.709, but the color tags are
+    /// otherwise copied straight from the source (`:128`,`:135`,`:137`), so the
+    /// file would still claim to be log and every player would show it wrong.
+    /// Only set when a LUT is actually applied - overriding otherwise would
+    /// mislabel footage that was never converted.
+    pub force_bt709: bool,
 }
 #[derive(Default)]
 pub struct VideoTranscoder<'a> {
@@ -126,15 +134,29 @@ impl<'a> VideoTranscoder<'a> {
             (*encoder.as_mut_ptr()).rc_min_rate = bitrate as i64;
         }
         encoder.set_color_range(color_range);
-        encoder.set_colorspace(frame.color_space());
+        if params.force_bt709 {
+            encoder.set_colorspace(ffmpeg_next::color::Space::BT709);
+        } else {
+            encoder.set_colorspace(frame.color_space());
+        }
         let gop: f64 = params.frame_rate.unwrap_or(Rational::new(30, 1)).into();
         encoder.set_gop(((gop * params.keyframe_distance_s) as u32).max(1));
 
+        // Written through the raw pointer because the wrapper exposes no setter
+        // for these two - the same pattern the copy below already used.
         unsafe {
             if !codec_name.contains("videotoolbox") {
-                (*encoder.as_mut_ptr()).color_trc = (*frame.as_ptr()).color_trc;
+                (*encoder.as_mut_ptr()).color_trc = if params.force_bt709 {
+                    ffi::AVColorTransferCharacteristic::AVCOL_TRC_BT709
+                } else {
+                    (*frame.as_ptr()).color_trc
+                };
             }
-            (*encoder.as_mut_ptr()).color_primaries = (*frame.as_ptr()).color_primaries;
+            (*encoder.as_mut_ptr()).color_primaries = if params.force_bt709 {
+                ffi::AVColorPrimaries::AVCOL_PRI_BT709
+            } else {
+                (*frame.as_ptr()).color_primaries
+            };
         }
 
         if global_header {

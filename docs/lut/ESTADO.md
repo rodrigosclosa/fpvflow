@@ -160,15 +160,58 @@ Detalhe que quase virou bug: `planes` é montado **uma vez** (guardado por
 dois precisam concordar, então leem a mesma flag `needs_rgb_for_lut` em vez de
 recalcular a condição.
 
-## Próximo passo
+## Fases 4–7
 
-**Fase 4 — biblioteca de LUTs** (pasta global nas settings) e o **slider de
-intensidade**, que a especificação pede e ainda não existe: hoje o LUT é aplicado
-a 100%.
+**Fase 4 — intensidade e biblioteca.** O slider entrou como `lut_amount` no
+`KernelParams`, reaproveitando o slot `reserved1` (declarado nos cinco espelhos,
+lido em lugar nenhum), então **o layout da struct não mudou**. Cada backend
+mistura o pixel graduado com o original e sai cedo quando o valor é 0 — o que
+poupa oito buscas de textura por pixel sem LUT.
 
-Depois, Fases 5–7 (ajustes por-pixel, vignette, tag de cor no export). A **Fase 6
-segue precisando de replanejamento** — nitidez não cabe no ponto de injeção
-atual, conforme o risco 1.
+O `Stabilization` passou a implementar `Default` à mão: o derive zeraria a
+intensidade, e **todos os locais de construção usam `Stabilization::default()`**,
+inclusive o caminho de exportação, então um zero derivado esconderia todo LUT ali.
+
+A biblioteca lista os `.cube` de uma pasta escolhida uma vez, guardada nas
+settings globais (não no projeto). O `list_folder` devolve **diretórios também**,
+então o filtro de extensão é o que os mantém fora, e a lista é ordenada porque a
+ordem do `read_dir` não é estável entre execuções.
+
+**Fase 5 — ajustes por-pixel.** Oito controles: exposição (EV), contraste,
+saturação, temperatura, tint, altas luzes, sombras e vignette. A ordem é parte do
+resultado — exposição, balanço de branco, tom, e **saturação por último**, para
+agir sobre os tons que os passos anteriores produziram.
+
+A implementação de referência é `src/core/color/adjustments.rs`, com **12 testes**;
+os três shaders carregam cópias que precisam concordar com ela. Novos campos
+`color_adjust1/2` (dois `vec4`) foram acrescentados ao fim do `KernelParams`.
+
+> **Cuidado:** o `cpu_undistort.rs` faz `transmute` do `KernelParams` para o do
+> `stabilize_spirv`, que é declarado à parte (crate `no_std`, usa `glam::Vec4`).
+> Um `const _: () = assert!(size_of ...)` agora trava os dois tamanhos — divergir
+> seria comportamento indefinido.
+
+**Fase 6 — não existe como fase separada.** O vignette, que era o que dela cabia,
+entrou na Fase 5. A **nitidez continua fora de escopo**: `process_final_pixel` é
+por-pixel e amostrar vizinhos exigiria refazer o warp por tap (risco 1). Fazê-la
+direito pede um passe separado sobre o frame já estabilizado, que não existe hoje
+— e não é uma extensão desta feature, é outra.
+
+**Fase 7 — tag de cor.** Quando há LUT carregado, a saída é marcada **bt709**
+(`colorspace`, `color_trc` e `color_primaries`). Sem isso o arquivo continuaria
+alegando ser log, porque as tags são copiadas da origem, e todo player mostraria
+errado. É condicionado ao LUT: marcar material não convertido como bt709 seria
+mentira na direção oposta.
+
+## O que continua sem verificação
+
+**Nada foi exercitado com GPU e vídeo real** — só build, testes de unidade e
+validação de shader. A cadeia completa (carregar `.cube`, ver a imagem mudar,
+exportar e conferir a tag) depende de rodar o binário.
+
+E o defeito pré-existente do `sws` fixado em BT.709 (`ffmpeg_video.rs:340-347`)
+**continua lá** — não foi tocado, e pode confundir a validação da tag em material
+BT.2020.
 
 ### Como isto é testado sem GPU
 

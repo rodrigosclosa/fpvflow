@@ -279,6 +279,21 @@ impl Stabilization {
             }
         }
 
+        // Per-pixel color adjustments, applied after the LUT.
+        //
+        // Must stay in step with apply_color_adjustments in wgpu_undistort.wgsl,
+        // opencl_undistort.cl and qt_gpu/undistort.frag - same order, same
+        // constants. This is the only one of the four that is unit-tested.
+        #[inline]
+        fn apply_color_adjustments(px: &mut Vector4<f32>, out_pos: (f32, f32), params: &KernelParams) {
+            crate::color::adjustments::apply(
+                px, out_pos,
+                params.color_adjust1, params.color_adjust2,
+                params.max_pixel_value,
+                (params.output_width as f32, params.output_height as f32),
+            );
+        }
+
         fn rotate_point(pos: (f32, f32), angle: f32, origin: (f32, f32), origin2: (f32, f32)) -> (f32, f32) {
              return (angle.cos() * (pos.0 - origin.0) - angle.sin() * (pos.1 - origin.1) + origin2.0,
                      angle.sin() * (pos.0 - origin.0) + angle.cos() * (pos.1 - origin.1) + origin2.1);
@@ -629,6 +644,7 @@ impl Stabilization {
                                     // limited range - the LUT domain is full range.
                                     // This branch returns early.
                                     if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value, params.lut_amount); }
+                            apply_color_adjustments(&mut pixel, (x as f32, y as f32), params);
                                     if fix_range {
                                         remap_colorrange(&mut pixel, is_y)
                                     }
@@ -641,6 +657,7 @@ impl Stabilization {
                             // draw_pixel(&mut pixel, p.0 as i32, p.1 as i32, false, params.output_width, params, drawing);
 
                             if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value, params.lut_amount); }
+                            apply_color_adjustments(&mut pixel, (x as f32, y as f32), params);
                             if fix_range {
                                 remap_colorrange(&mut pixel, is_y)
                             }

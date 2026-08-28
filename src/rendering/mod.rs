@@ -278,6 +278,11 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     proc.video.encoder_params.hw_device_type = encoder.2;
     proc.video.encoder_params.options.set("threads", "auto");
     proc.video.encoder_params.metadata = render_options.get_metadata_dict();
+    // A conversion LUT is what turns log into Rec.709, so the output has to say
+    // so - the tags are otherwise copied from the source and the file would
+    // still claim to be log. Gated on a LUT being loaded, because tagging
+    // unconverted footage as bt709 would be a lie in the other direction.
+    proc.video.encoder_params.force_bt709 = stab.stabilization.read().color_lut().is_some();
     proc.video.processing_order = order;
     log::debug!("video_codec: {:?}, processing_order: {:?}", &proc.video_codec, proc.video.processing_order);
 

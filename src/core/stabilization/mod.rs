@@ -145,9 +145,23 @@ pub struct KernelParams {
     pub reserved2:                f32, // 16
     pub ewa_coeffs_p:             [f32; 4], // 16
     pub ewa_coeffs_q:             [f32; 4], // 16
+    /// Per-pixel color adjustments, applied after the LUT in Rec.709.
+    /// `[exposure_ev, contrast, saturation, temperature]`
+    pub color_adjust1:            [f32; 4], // 16
+    /// `[tint, highlights, shadows, vignette]`
+    pub color_adjust2:            [f32; 4], // 16
 }
 unsafe impl bytemuck::Zeroable for KernelParams {}
 unsafe impl bytemuck::Pod for KernelParams {}
+
+// cpu_undistort.rs transmutes this into stabilize_spirv::KernelParams, which is
+// declared separately because that crate is no_std and uses glam's Vec4. If the
+// two ever drift apart the transmute is undefined behaviour, so pin the size
+// here rather than find out at runtime.
+const _: () = assert!(
+    std::mem::size_of::<KernelParams>() == std::mem::size_of::<stabilize_spirv::KernelParams>(),
+    "KernelParams and stabilize_spirv::KernelParams must stay the same size - they are transmuted"
+);
 
 #[derive(Default, Debug)]
 pub enum BackendType {
@@ -216,7 +230,12 @@ pub struct Stabilization {
     /// otherwise. This is why `Default` is written out below instead of derived -
     /// every construction site uses `Stabilization::default()`, including the
     /// export path, so a derived zero would silently hide every LUT there.
-    color_lut_amount: f32
+    color_lut_amount: f32,
+
+    /// `[exposure_ev, contrast, saturation, temperature]`, all 0 = no change.
+    color_adjust1: [f32; 4],
+    /// `[tint, highlights, shadows, vignette]`, all 0 = no change.
+    color_adjust2: [f32; 4]
 }
 
 impl Default for Stabilization {
@@ -241,6 +260,10 @@ impl Default for Stabilization {
             color_lut_version: 0,
             color_lut_payload: None,
             color_lut_amount: 1.0,
+            // All zero is "no adjustment", so the derive would have been right
+            // here - written out only because the struct no longer derives it.
+            color_adjust1: [0.0; 4],
+            color_adjust2: [0.0; 4],
         }
     }
 }
@@ -319,6 +342,43 @@ impl Stabilization {
     /// Current LUT strength, 0..1.
     pub fn color_lut_amount(&self) -> f32 { self.color_lut_amount }
 
+    /// Sets one adjustment by name. Unknown names are ignored, which keeps a
+    /// project written by a newer version from failing to load here.
+    pub fn set_color_adjustment(&mut self, name: &str, value: f32) {
+        match name {
+            "exposure"    => self.color_adjust1[0] = value.clamp(-5.0, 5.0),
+            "contrast"    => self.color_adjust1[1] = value.clamp(-1.0, 1.0),
+            "saturation"  => self.color_adjust1[2] = value.clamp(-1.0, 1.0),
+            "temperature" => self.color_adjust1[3] = value.clamp(-1.0, 1.0),
+            "tint"        => self.color_adjust2[0] = value.clamp(-1.0, 1.0),
+            "highlights"  => self.color_adjust2[1] = value.clamp(-1.0, 1.0),
+            "shadows"     => self.color_adjust2[2] = value.clamp(-1.0, 1.0),
+            "vignette"    => self.color_adjust2[3] = value.clamp(0.0, 1.0),
+            _ => log::warn!("Unknown color adjustment: {name}")
+        }
+    }
+
+    /// Reads one adjustment by name; 0.0 for an unknown one.
+    pub fn color_adjustment(&self, name: &str) -> f32 {
+        match name {
+            "exposure"    => self.color_adjust1[0],
+            "contrast"    => self.color_adjust1[1],
+            "saturation"  => self.color_adjust1[2],
+            "temperature" => self.color_adjust1[3],
+            "tint"        => self.color_adjust2[0],
+            "highlights"  => self.color_adjust2[1],
+            "shadows"     => self.color_adjust2[2],
+            "vignette"    => self.color_adjust2[3],
+            _ => 0.0
+        }
+    }
+
+    /// Resets every adjustment to its neutral value.
+    pub fn reset_color_adjustments(&mut self) {
+        self.color_adjust1 = [0.0; 4];
+        self.color_adjust2 = [0.0; 4];
+    }
+
     /// Version of the loaded LUT; 0 means none was ever set.
     pub fn color_lut_version(&self) -> u64 { self.color_lut_version }
 
@@ -391,6 +451,8 @@ impl Stabilization {
         // struct, not to the shared compute params - and every backend reads the
         // transform built here, so one assignment covers all four.
         transform.kernel_params.lut_amount = if self.color_lut.is_some() { self.color_lut_amount } else { 0.0 };
+        transform.kernel_params.color_adjust1 = self.color_adjust1;
+        transform.kernel_params.color_adjust2 = self.color_adjust2;
         transform.kernel_params.interpolation = self.interpolation as i32;
         transform.kernel_params.width  = self.size.0 as i32;
         transform.kernel_params.height = self.size.1 as i32;

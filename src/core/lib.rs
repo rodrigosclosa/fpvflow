@@ -994,6 +994,15 @@ impl StabilizationManager {
     /// Current LUT strength, 0..1.
     pub fn color_lut_amount(&self) -> f32 { self.stabilization.read().color_lut_amount() }
 
+    /// Sets one color adjustment by name.
+    pub fn set_color_adjustment(&self, name: &str, v: f32) { self.stabilization.write().set_color_adjustment(name, v); }
+
+    /// Reads one color adjustment by name.
+    pub fn color_adjustment(&self, name: &str) -> f32 { self.stabilization.read().color_adjustment(name) }
+
+    /// Resets every color adjustment.
+    pub fn reset_color_adjustments(&self) { self.stabilization.write().reset_color_adjustments(); }
+
     /// Path of the loaded LUT, or an empty string.
     pub fn color_lut_path(&self) -> String {
         self.stabilization.read().color_lut().map(|l| l.path.clone()).unwrap_or_default()

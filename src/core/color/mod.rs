@@ -20,4 +20,5 @@
 //! gradients, which is exactly the material a log-to-Rec.709 conversion is used
 //! on.
 
+pub mod adjustments;
 pub mod lut;
