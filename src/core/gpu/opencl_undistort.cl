@@ -51,8 +51,10 @@ typedef struct {
     float reserved2;                 // 16
     float4 ewa_coeffs_p;             // 16
     float4 ewa_coeffs_q;             // 16
-    float4 color_adjust1;            // 16 - exposure_ev, contrast, saturation, temperature
-    float4 color_adjust2;            // 16 - tint, highlights, shadows, vignette
+    float4 color_adjust1;            // 16 - exposure, luminance, contrast, highlights
+    float4 color_adjust2;            // 16 - shadows, whites, blacks, temperature
+    float4 color_adjust3;            // 16 - tint, saturation, vibrance, vignette
+    float4 color_adjust4;            // 16 - sharpness, unused x3
 } KernelParams;
 
 #if INTERPOLATION == 2 // Bilinear
@@ -631,59 +633,85 @@ float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global 
 
 // Per-pixel color adjustments, applied after the LUT.
 //
-// Must stay in step with apply_color_adjustments in wgpu_undistort.wgsl,
-// undistort.frag and cpu_undistort.rs - same order, same constants. The order is
-// deliberate: exposure, white balance, tone, then saturation last so it acts on
-// the final tones.
-float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelParams *params) {
-    float exposure_ev = params->color_adjust1.x;
-    float contrast    = params->color_adjust1.y;
-    float saturation  = params->color_adjust1.z;
-    float temperature = params->color_adjust1.w;
-    float tint        = params->color_adjust2.x;
-    float highlights  = params->color_adjust2.y;
-    float shadows     = params->color_adjust2.z;
-    float vignette    = params->color_adjust2.w;
+// Mirrors core/color/adjustments.rs exactly - same order, same constants. That
+// module is the reference and carries the tests.
+#define LUMA_W          ((float3)(0.2126f, 0.7152f, 0.0722f))
+#define EXPOSURE_STOPS  2.0f
+#define LUMINANCE_GAIN  0.5f
+#define CONTRAST_PIVOT  0.5f
+#define TONAL_STRENGTH  0.5f
+#define WB_STRENGTH     0.2f
+#define VIGNETTE_INNER  0.3f
+#define VIGNETTE_OUTER  1.0f
 
-    if (exposure_ev == 0.0f && contrast == 0.0f && saturation == 0.0f && temperature == 0.0f &&
-        tint == 0.0f && highlights == 0.0f && shadows == 0.0f && vignette == 0.0f) {
+float eotf_r709(float v) { return v < 0.081f ? v / 4.5f : pow((v + 0.099f) / 1.099f, 1.0f / 0.45f); }
+float oetf_r709(float v) { return v < 0.018f ? v * 4.5f : 1.099f * pow(v, 0.45f) - 0.099f; }
+float3 eotf3(float3 c) { return (float3)(eotf_r709(c.x), eotf_r709(c.y), eotf_r709(c.z)); }
+float3 oetf3(float3 c) { return (float3)(oetf_r709(c.x), oetf_r709(c.y), oetf_r709(c.z)); }
+
+float3 tonal_band(float3 c, float amount, float e0, float e1, bool invert) {
+    if (amount == 0.0f) return c;
+    float l = dot(c, LUMA_W);
+    float mask = smoothstep(e0, e1, l);
+    if (invert) mask = 1.0f - mask;
+    float w = fabs(amount) * mask * TONAL_STRENGTH;
+    float dest = amount > 0.0f ? 1.0f : 0.0f;
+    return c + ((float3)(dest, dest, dest) - c) * w;
+}
+
+float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelParams *params) {
+    float exposure    = params->color_adjust1.x;
+    float luminance   = params->color_adjust1.y;
+    float contrast    = params->color_adjust1.z;
+    float highlights  = params->color_adjust1.w;
+    float shadows     = params->color_adjust2.x;
+    float whites      = params->color_adjust2.y;
+    float blacks      = params->color_adjust2.z;
+    float temperature = params->color_adjust2.w;
+    float tint        = params->color_adjust3.x;
+    float saturation  = params->color_adjust3.y;
+    float vibrance    = params->color_adjust3.z;
+    float vignette    = params->color_adjust3.w;
+
+    if (exposure == 0.0f && luminance == 0.0f && contrast == 0.0f && highlights == 0.0f &&
+        shadows == 0.0f && whites == 0.0f && blacks == 0.0f && temperature == 0.0f &&
+        tint == 0.0f && saturation == 0.0f && vibrance == 0.0f && vignette == 0.0f) {
         return pixel;
     }
 
     float3 c = (float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value;
 
-    if (exposure_ev != 0.0f) { c *= pow(2.0f, exposure_ev); }
+    if (exposure != 0.0f) {
+        c = oetf3(eotf3(fmax(c, (float3)(0.0f, 0.0f, 0.0f))) * exp2(exposure * EXPOSURE_STOPS));
+    }
+    if (luminance != 0.0f) { c *= 1.0f + luminance * LUMINANCE_GAIN; }
+    if (contrast != 0.0f) { c = (c - CONTRAST_PIVOT) * (1.0f + contrast) + CONTRAST_PIVOT; }
+
+    c = tonal_band(c, blacks,     0.0f,  0.25f, true);
+    c = tonal_band(c, shadows,    0.0f,  0.5f,  true);
+    c = tonal_band(c, highlights, 0.5f,  1.0f,  false);
+    c = tonal_band(c, whites,     0.75f, 1.0f,  false);
 
     if (temperature != 0.0f || tint != 0.0f) {
-        c.x += temperature * 0.2f;
-        c.z -= temperature * 0.2f;
-        c.y += tint * 0.2f;
+        float t = temperature * WB_STRENGTH;
+        float g = tint * WB_STRENGTH;
+        c = (float3)(c.x + t + g * 0.5f, c.y - g, c.z - t + g * 0.5f);
     }
-
-    if (contrast != 0.0f) { c = (c - 0.18f) * (1.0f + contrast) + 0.18f; }
-
-    float3 luma_weights = (float3)(0.2126f, 0.7152f, 0.0722f);
-
-    if (highlights != 0.0f || shadows != 0.0f) {
-        float l = dot(c, luma_weights);
-        float hi_mask = smoothstep(0.5f, 1.0f, l);
-        float lo_mask = 1.0f - smoothstep(0.0f, 0.5f, l);
-        c += highlights * hi_mask * 0.5f;
-        c += shadows * lo_mask * 0.5f;
-    }
-
     if (saturation != 0.0f) {
-        float l = dot(c, luma_weights);
-        c = mix((float3)(l, l, l), c, 1.0f + saturation);
+        float l = dot(c, LUMA_W);
+        c = (float3)(l, l, l) + (c - (float3)(l, l, l)) * (1.0f + saturation);
     }
-
+    if (vibrance != 0.0f) {
+        float l = dot(c, LUMA_W);
+        float sat = clamp(fmax(c.x, fmax(c.y, c.z)) - fmin(c.x, fmin(c.y, c.z)), 0.0f, 1.0f);
+        c = (float3)(l, l, l) + (c - (float3)(l, l, l)) * (1.0f + vibrance * (1.0f - sat));
+    }
     if (vignette != 0.0f) {
         float2 size = (float2)((float)params->output_width, (float)params->output_height);
-        float2 d = (out_pos / size) - 0.5f;
-        d.x *= size.x / fmax(size.y, 1.0f);
-        float corner = length((float2)(0.5f * size.x / fmax(size.y, 1.0f), 0.5f));
-        float r = length(d) / fmax(corner, 0.0001f);
-        c *= 1.0f - vignette * smoothstep(0.3f, 1.0f, r);
+        float aspect = size.x / fmax(size.y, 1.0f);
+        float2 d = (float2)((out_pos.x / fmax(size.x, 1.0f) - 0.5f) * aspect, out_pos.y / fmax(size.y, 1.0f) - 0.5f);
+        float v = smoothstep(VIGNETTE_OUTER, VIGNETTE_INNER, length(d) / length((float2)(0.5f * aspect, 0.5f)));
+        c *= 1.0f + vignette * (1.0f - v);
     }
 
     c = clamp(c, 0.0f, 1.0f) * params->max_pixel_value;

@@ -288,7 +288,7 @@ impl Stabilization {
         fn apply_color_adjustments(px: &mut Vector4<f32>, out_pos: (f32, f32), params: &KernelParams) {
             crate::color::adjustments::apply(
                 px, out_pos,
-                params.color_adjust1, params.color_adjust2,
+                &[params.color_adjust1, params.color_adjust2, params.color_adjust3, params.color_adjust4],
                 params.max_pixel_value,
                 (params.output_width as f32, params.output_height as f32),
             );

@@ -579,6 +579,21 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     plane.share_wgpu_instances = true;
                     plane.set_device(stab.params.read().current_device as isize);
 
+                    // The color state lives on the manager's Stabilization, and
+                    // this is a fresh one per plane - without copying it across,
+                    // the export silently comes out ungraded while the preview
+                    // looks right.
+                    {
+                        let src = stab.stabilization.read();
+                        let lut = src.color_lut_arc();
+                        let amount = src.color_lut_amount();
+                        let adjustments = src.color_adjustments();
+                        drop(src);
+                        plane.set_color_lut(lut);
+                        plane.set_color_lut_amount(amount);
+                        plane.set_color_adjustments(adjustments);
+                    }
+
                     // Workaround for a bug in prores videotoolbox encoder
                     if $in_frame.format() == ffmpeg_next::format::Pixel::NV12 && is_prores_videotoolbox {
                         plane.kernel_flags.set(KernelParamsFlags::FIX_COLOR_RANGE, true);

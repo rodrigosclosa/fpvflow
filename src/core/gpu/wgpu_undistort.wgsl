@@ -49,8 +49,10 @@ struct KernelParams {
     reserved2:                f32, // 16
     ewa_coeffs_p:             vec4<f32>, // 16
     ewa_coeffs_q:             vec4<f32>, // 16
-    color_adjust1:            vec4<f32>, // 16 - exposure_ev, contrast, saturation, temperature
-    color_adjust2:            vec4<f32>, // 16 - tint, highlights, shadows, vignette
+    color_adjust1:            vec4<f32>, // 16 - exposure, luminance, contrast, highlights
+    color_adjust2:            vec4<f32>, // 16 - shadows, whites, blacks, temperature
+    color_adjust3:            vec4<f32>, // 16 - tint, saturation, vibrance, vignette
+    color_adjust4:            vec4<f32>, // 16 - sharpness, unused x3
 }
 
 @group(0) @binding(0) @fragment var<uniform> params: KernelParams;
@@ -625,76 +627,130 @@ fn apply_color_lut(pixel: vec4<f32>) -> vec4<f32> {
 
 // Per-pixel color adjustments, applied after the LUT.
 //
-// Order is deliberate and matches how a grading panel reads top to bottom:
-// exposure, then white balance, then tone (contrast, highlights, shadows), then
-// saturation last so it acts on the final tones. Reordering changes the result.
-//
-// Everything works on the 0..1 normalized value, so the same constants hold at
-// 8, 10 and 16 bit. Rec.709 luma weights, matching the output the LUT targets.
-fn apply_color_adjustments(pixel: vec4<f32>, out_pos: vec2<f32>) -> vec4<f32> {
-    let exposure_ev = params.color_adjust1.x;
-    let contrast    = params.color_adjust1.y;
-    let saturation  = params.color_adjust1.z;
-    let temperature = params.color_adjust1.w;
-    let tint        = params.color_adjust2.x;
-    let highlights  = params.color_adjust2.y;
-    let shadows     = params.color_adjust2.z;
-    let vignette    = params.color_adjust2.w;
+// Mirrors core/color/adjustments.rs exactly - same order, same constants. That
+// module is the reference and carries the tests; this is a hand copy because the
+// project shares no code between backends.
+const LUMA_W: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+const EXPOSURE_STOPS: f32 = 2.0;
+const LUMINANCE_GAIN: f32 = 0.5;
+const CONTRAST_PIVOT: f32 = 0.5;
+const TONAL_STRENGTH: f32 = 0.5;
+const WB_STRENGTH: f32 = 0.2;
+const VIGNETTE_INNER: f32 = 0.3;
+const VIGNETTE_OUTER: f32 = 1.0;
 
-    // Nothing to do: the common case is every slider at its default.
-    if (exposure_ev == 0.0 && contrast == 0.0 && saturation == 0.0 && temperature == 0.0 &&
-        tint == 0.0 && highlights == 0.0 && shadows == 0.0 && vignette == 0.0) {
+// Rec.709 transfer functions. Exposure linearizes because light multiplies in
+// linear space; doing it on encoded values would lift midtones far too much.
+fn eotf_r709(v: f32) -> f32 {
+    if (v < 0.081) { return v / 4.5; }
+    return pow((v + 0.099) / 1.099, 1.0 / 0.45);
+}
+fn oetf_r709(v: f32) -> f32 {
+    if (v < 0.018) { return v * 4.5; }
+    return 1.099 * pow(v, 0.45) - 0.099;
+}
+fn eotf3(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(eotf_r709(c.r), eotf_r709(c.g), eotf_r709(c.b)); }
+fn oetf3(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(oetf_r709(c.r), oetf_r709(c.g), oetf_r709(c.b)); }
+
+// One tonal band: mixes its region toward white or black rather than adding a
+// raw offset, so the ends do not clip abruptly.
+fn tonal_band(c: vec3<f32>, amount: f32, e0: f32, e1: f32, invert: bool) -> vec3<f32> {
+    if (amount == 0.0) { return c; }
+    let l = dot(c, LUMA_W);
+    var mask = smoothstep(e0, e1, l);
+    if (invert) { mask = 1.0 - mask; }
+    let w = abs(amount) * mask * TONAL_STRENGTH;
+    // Named `dest`, not `target`: that is a reserved keyword in WGSL.
+    var dest = 0.0;
+    if (amount > 0.0) { dest = 1.0; }
+    return c + (vec3<f32>(dest) - c) * w;
+}
+
+fn apply_color_adjustments(pixel: vec4<f32>, out_pos: vec2<f32>) -> vec4<f32> {
+    let exposure   = params.color_adjust1.x;
+    let luminance  = params.color_adjust1.y;
+    let contrast   = params.color_adjust1.z;
+    let highlights = params.color_adjust1.w;
+    let shadows    = params.color_adjust2.x;
+    let whites     = params.color_adjust2.y;
+    let blacks     = params.color_adjust2.z;
+    let temperature= params.color_adjust2.w;
+    let tint       = params.color_adjust3.x;
+    let saturation = params.color_adjust3.y;
+    let vibrance   = params.color_adjust3.z;
+    let vignette   = params.color_adjust3.w;
+
+    if (exposure == 0.0 && luminance == 0.0 && contrast == 0.0 && highlights == 0.0 &&
+        shadows == 0.0 && whites == 0.0 && blacks == 0.0 && temperature == 0.0 &&
+        tint == 0.0 && saturation == 0.0 && vibrance == 0.0 && vignette == 0.0) {
         return pixel;
     }
 
     var c = pixel.rgb / params.max_pixel_value;
 
-    // Exposure in stops, which is what the number means to a photographer.
-    if (exposure_ev != 0.0) { c *= pow(2.0, exposure_ev); }
-
-    // White balance as a cheap channel tilt: warm pushes red and pulls blue,
-    // tint trades green against magenta. Not a chromatic adaptation transform,
-    // but predictable and monotonic, which is what a slider needs.
+    // 1. Exposure, in stops, in linear light.
+    if (exposure != 0.0) {
+        c = oetf3(eotf3(max(c, vec3<f32>(0.0))) * exp2(exposure * EXPOSURE_STOPS));
+    }
+    // 2. Luminance: display-space gain, deliberately a different curve.
+    if (luminance != 0.0) { c *= 1.0 + luminance * LUMINANCE_GAIN; }
+    // 3. Contrast around middle grey.
+    if (contrast != 0.0) { c = (c - CONTRAST_PIVOT) * (1.0 + contrast) + CONTRAST_PIVOT; }
+    // 4-7. Tonal bands, darkest first.
+    c = tonal_band(c, blacks,     0.0,  0.25, true);
+    c = tonal_band(c, shadows,    0.0,  0.5,  true);
+    c = tonal_band(c, highlights, 0.5,  1.0,  false);
+    c = tonal_band(c, whites,     0.75, 1.0,  false);
+    // 8-9. White balance.
     if (temperature != 0.0 || tint != 0.0) {
-        c.r += temperature * 0.2;
-        c.b -= temperature * 0.2;
-        c.g += tint * 0.2;
+        let t = temperature * WB_STRENGTH;
+        let g = tint * WB_STRENGTH;
+        c = vec3<f32>(c.r + t + g * 0.5, c.g - g, c.b - t + g * 0.5);
     }
-
-    // Contrast pivots around middle grey so the image does not also brighten.
-    if (contrast != 0.0) { c = (c - 0.18) * (1.0 + contrast) + 0.18; }
-
-    let luma_weights = vec3<f32>(0.2126, 0.7152, 0.0722);
-
-    // Highlights and shadows use smooth masks rather than hard thresholds, so a
-    // moving edge does not band as the mask flips.
-    if (highlights != 0.0 || shadows != 0.0) {
-        let l = dot(c, luma_weights);
-        let hi_mask = smoothstep(0.5, 1.0, l);
-        let lo_mask = 1.0 - smoothstep(0.0, 0.5, l);
-        c += highlights * hi_mask * 0.5;
-        c += shadows * lo_mask * 0.5;
-    }
-
-    // Saturation last, so it acts on the tones the steps above produced.
+    // 10. Saturation.
     if (saturation != 0.0) {
-        let l = dot(c, luma_weights);
-        c = mix(vec3<f32>(l), c, 1.0 + saturation);
+        let l = dot(c, LUMA_W);
+        c = vec3<f32>(l) + (c - vec3<f32>(l)) * (1.0 + saturation);
     }
-
-    // Vignette darkens toward the corners. The radius is aspect-corrected, so a
-    // 16:9 frame gets a circle rather than an ellipse.
+    // 11. Vibrance: backs off where the pixel is already saturated.
+    if (vibrance != 0.0) {
+        let l = dot(c, LUMA_W);
+        let sat = clamp(max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b)), 0.0, 1.0);
+        c = vec3<f32>(l) + (c - vec3<f32>(l)) * (1.0 + vibrance * (1.0 - sat));
+    }
+    // 12. Vignette, aspect-corrected so the falloff is a circle.
     if (vignette != 0.0) {
         let size = vec2<f32>(f32(params.output_width), f32(params.output_height));
-        var d = (out_pos / size) - 0.5;
-        d.x *= size.x / max(size.y, 1.0);
-        // Normalized so the corner reaches 1.0 regardless of aspect.
-        let corner = length(vec2<f32>(0.5 * size.x / max(size.y, 1.0), 0.5));
-        let r = length(d) / max(corner, 0.0001);
-        c *= 1.0 - vignette * smoothstep(0.3, 1.0, r);
+        let aspect = size.x / max(size.y, 1.0);
+        let d = vec2<f32>((out_pos.x / max(size.x, 1.0) - 0.5) * aspect, out_pos.y / max(size.y, 1.0) - 0.5);
+        let v = smoothstep(VIGNETTE_OUTER, VIGNETTE_INNER, length(d) / length(vec2<f32>(0.5 * aspect, 0.5)));
+        c *= 1.0 + vignette * (1.0 - v);
     }
 
     return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * params.max_pixel_value, pixel.a);
+}
+
+// Unsharp mask, using the four neighbours in SOURCE space.
+//
+// The spec asks for sharpening on the stabilized frame. This shader only has
+// sample_input_at, which reads the source, so the neighbourhood is taken there
+// and warped along with the centre pixel. For the small radius a sharpen uses
+// the two differ only where the warp is extreme (strong fisheye at the corners),
+// and the alternative - redoing the warp per tap - is prohibitive.
+fn apply_sharpness(pixel: vec4<f32>, uv: vec2<f32>, jac: vec4<f32>) -> vec4<f32> {
+    let amount = params.color_adjust4.x;
+    if (amount <= 0.0) { return pixel; }
+
+    // One source pixel in each direction.
+    let blur = (pixel * 4.0
+              + sample_input_at(uv + vec2<f32>( 1.0, 0.0), jac)
+              + sample_input_at(uv + vec2<f32>(-1.0, 0.0), jac)
+              + sample_input_at(uv + vec2<f32>( 0.0, 1.0), jac)
+              + sample_input_at(uv + vec2<f32>( 0.0,-1.0), jac)) / 8.0;
+    let high = pixel - blur;
+    // K caps the strength so 100 % is strong but not haloed.
+    let sharpened = pixel + high * (amount * 1.5);
+    return vec4<f32>(clamp(sharpened.rgb, vec3<f32>(0.0), vec3<f32>(params.max_pixel_value)), pixel.a);
 }
 
 fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
@@ -764,6 +820,7 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
             // Before the overlays, so drawing and the safe area keep their own
             // colors. This branch returns early - forgetting it would leave part
             // of the frame ungraded.
+            pixel = apply_sharpness(pixel, uv, jac);
             pixel = apply_color_lut(pixel);
             pixel = apply_color_adjustments(pixel, p);
             pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);
@@ -773,6 +830,7 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
 
         pixel = sample_input_at(uv, jac);
     }
+    pixel = apply_sharpness(pixel, uv, jac);
     pixel = apply_color_lut(pixel);
     pixel = apply_color_adjustments(pixel, p);
     pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);

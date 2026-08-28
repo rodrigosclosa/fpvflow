@@ -43,23 +43,43 @@ MenuItem {
     ///
     /// The internal URL, not the readable path: it is what reopens the file, and
     /// on Android the two are not interchangeable.
-    /// The sliders, by the name the core knows them under. One list drives
-    /// saving, loading and resetting, so the three cannot drift apart.
-    readonly property var adjustmentSliders: ({
-        "exposure":    adjExposure,
-        "contrast":    adjContrast,
-        "saturation":  adjSaturation,
-        "temperature": adjTemperature,
-        "tint":        adjTint,
-        "highlights":  adjHighlights,
-        "shadows":     adjShadows,
-        "vignette":    adjVignette
-    });
+    /// The thirteen controls, grouped as the panel shows them. Names in English
+    /// (the core knows them by these), labels in PT-BR.
+    ///
+    /// `min` is -100 for bipolar controls and 0 for the one-sided ones; `to` is
+    /// always 100.
+    readonly property var adjustmentGroups: [
+        { "title": qsTr("Luz"), "items": [
+            { "name": "exposure",    "label": qsTr("Exposição"),   "min": -100, "unit": "%" },
+            { "name": "luminance",   "label": qsTr("Luminância"),  "min": -100, "unit": "%" },
+            { "name": "contrast",    "label": qsTr("Contraste"),   "min": -100, "unit": "%" },
+            { "name": "highlights",  "label": qsTr("Destaques"),   "min": -100, "unit": "%" },
+            { "name": "shadows",     "label": qsTr("Sombras"),     "min": -100, "unit": "%" },
+            { "name": "whites",      "label": qsTr("Brancos"),     "min": -100, "unit": "%" },
+            { "name": "blacks",      "label": qsTr("Pretos"),      "min": -100, "unit": "%" }
+        ]},
+        { "title": qsTr("Cor"), "items": [
+            { "name": "temperature", "label": qsTr("Temperatura"), "min": -100, "unit": "%" },
+            { "name": "tint",        "label": qsTr("Matiz"),       "min": -100, "unit": "%" },
+            { "name": "saturation",  "label": qsTr("Saturação"),   "min": -100, "unit": "%" },
+            { "name": "vibrance",    "label": qsTr("Vivacidade"),  "min": -100, "unit": "%" }
+        ]},
+        { "title": qsTr("Efeito"), "items": [
+            { "name": "sharpness",   "label": qsTr("Nitidez"),     "min": 0,    "unit": "%" },
+            { "name": "vignette",    "label": qsTr("Vignette"),    "min": -100, "unit": "%" }
+        ]}
+    ];
+
+    /// Live slider objects, filled in as the Repeater builds them. The sliders
+    /// are generated, so they cannot be referenced by id.
+    property var adjustmentSliders: ({});
+    function registerSlider(name: string, item: var): void { root.adjustmentSliders[name] = item; }
 
     /// Puts every slider back to neutral.
     function resetAdjustments(): void {
         for (const name in root.adjustmentSliders) root.adjustmentSliders[name].value = 0;
         controller.reset_color_adjustments();
+        window.videoArea.vid.forceRedraw();
     }
 
     function getSettings(): var {
@@ -68,7 +88,7 @@ MenuItem {
         for (const name in root.adjustmentSliders) {
             const v = root.adjustmentSliders[name].value;
             // Only what differs from neutral, so a project with no grading does
-            // not carry eight zeroes.
+            // not carry thirteen zeroes.
             if (v !== 0) { adjustments[name] = v; any = true; }
         }
 
@@ -89,11 +109,11 @@ MenuItem {
             controller.load_color_lut_url(o.url);
             // Before, 100% was the only option, so a project without the key
             // means full strength rather than none.
-            lutAmount.value = o.hasOwnProperty("amount")? +o.amount : 1.0;
+            lutAmount.value = o.hasOwnProperty("amount")? +o.amount : 100;
         }
 
-        // Absent means neutral, and the sliders are reset first so a project
-        // without grading clears whatever the previous clip left behind.
+        // Reset first, so a project without grading clears whatever the previous
+        // clip left behind.
         root.resetAdjustments();
         if (o.adjustments) {
             for (const name in root.adjustmentSliders) {
@@ -260,99 +280,53 @@ MenuItem {
     }
 
     // ---- Adjustments ----
-    // These run after the LUT, on Rec.709 values, so they behave the way a
-    // grading panel does rather than fighting the log curve. Collapsed by
-    // default: the common case is a LUT and nothing else.
+    // Thirteen controls in three groups, built from one list so the sliders, the
+    // save/load code and the reset cannot drift apart. Collapsed by default:
+    // the common case is a LUT and nothing else.
     AdvancedSection {
-        btn.text: qsTr("Adjustments");
+        id: adjustmentsSection;
+        btn.text: qsTr("Correção Básica");
 
-        Label {
-            text: qsTr("Exposure");
-            SliderWithField {
-                id: adjExposure;
-                // Stops, so ±2 EV covers ordinary correction without the slider
-                // becoming too coarse to be useful.
-                from: -2; to: 2; value: 0; defaultValue: 0;
-                unit: qsTr(" EV"); precision: 2;
+        Repeater {
+            model: root.adjustmentGroups;
+            Column {
                 width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("exposure", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Contrast");
-            SliderWithField {
-                id: adjContrast;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("contrast", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Saturation");
-            SliderWithField {
-                id: adjSaturation;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("saturation", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Temperature");
-            SliderWithField {
-                id: adjTemperature;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("temperature", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Tint");
-            SliderWithField {
-                id: adjTint;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("tint", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Highlights");
-            SliderWithField {
-                id: adjHighlights;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("highlights", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Shadows");
-            SliderWithField {
-                id: adjShadows;
-                from: -100; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("shadows", value); window.videoArea.vid.forceRedraw(); }
-            }
-        }
-        Label {
-            text: qsTr("Vignette");
-            SliderWithField {
-                // One-sided: a negative vignette would brighten the corners,
-                // which is not what the control means.
-                id: adjVignette;
-                from: 0; to: 100; value: 0; defaultValue: 0;
-                unit: "%"; precision: 0; scaler: 100.0;
-                width: parent.width;
-                onValueChanged: { controller.set_color_adjustment("vignette", value); window.videoArea.vid.forceRedraw(); }
+                spacing: parent.spacing;
+
+                BasicText {
+                    text: modelData.title;
+                    leftPadding: 0;
+                    font.bold: true;
+                    opacity: 0.7;
+                }
+
+                Repeater {
+                    model: modelData.items;
+                    Label {
+                        text: modelData.label;
+                        SliderWithField {
+                            // from/to are in the displayed scale; the core takes
+                            // the same number and divides by 100 in one place.
+                            from: modelData.min;
+                            to: 100;
+                            value: 0;
+                            defaultValue: 0;
+                            unit: modelData.unit;
+                            precision: 0;
+                            width: parent.width;
+                            Component.onCompleted: root.registerSlider(modelData.name, this);
+                            onValueChanged: {
+                                controller.set_color_adjustment(modelData.name, value);
+                                window.videoArea.vid.forceRedraw();
+                            }
+                        }
+                    }
+                }
             }
         }
 
         Button {
-            text: qsTr("Reset adjustments");
+            text: qsTr("Redefinir ajustes");
             iconName: "undo";
             width: parent.width;
             onClicked: root.resetAdjustments();
