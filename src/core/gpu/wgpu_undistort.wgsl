@@ -58,10 +58,14 @@ struct KernelParams {
 @group(0) @binding(4) @fragment var<storage, read> drawing: array<u32>;
 // {texture_input}
 @group(0) @binding(5) @fragment var input_texture: texture_2d<SCALAR>;
+// The color LUT. It always exists - an identity table when none is loaded - so
+// that this binding never has to appear and disappear between pipelines.
+@group(0) @binding(6) @fragment var lut_texture: texture_3d<f32>;
 // {/texture_input}
 // {buffer_input}
 @group(0) @binding(5) @fragment var<storage, read> input_buffer: array<SCALAR>;
 @group(0) @binding(6) @fragment var<storage, read_write> output_buffer: array<SCALAR>;
+@group(0) @binding(7) @fragment var lut_texture: texture_3d<f32>;
 // {/buffer_input}
 
 LENS_MODEL_FUNCTIONS;
@@ -569,6 +573,47 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
 // Adapted from OpenCV: initUndistortRectifyMap + remap
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
+// Applies the color LUT with trilinear interpolation, done by hand.
+//
+// There is no sampler in this pipeline - every texture here is bound
+// unfilterable and read with textureLoad - so the eight surrounding texels are
+// fetched and blended explicitly. This mirrors Lut::sample in
+// core/color/lut/mod.rs, which is what the CPU path and the tests use.
+//
+// The input arrives in the pipeline's own scale (0..max_pixel_value), not 0..1,
+// so it is normalized before indexing and scaled back afterwards.
+fn apply_color_lut(pixel: vec4<f32>) -> vec4<f32> {
+    let n = i32(textureDimensions(lut_texture).x);
+    let last = f32(n - 1);
+
+    let rgb = clamp(pixel.rgb / params.max_pixel_value, vec3<f32>(0.0), vec3<f32>(1.0));
+    let pos = rgb * last;
+    let base = vec3<i32>(floor(pos));
+    let f = pos - floor(pos);
+
+    let i0 = clamp(base,                    vec3<i32>(0), vec3<i32>(n - 1));
+    let i1 = clamp(base + vec3<i32>(1),     vec3<i32>(0), vec3<i32>(n - 1));
+
+    let c000 = textureLoad(lut_texture, vec3<i32>(i0.x, i0.y, i0.z), 0).rgb;
+    let c100 = textureLoad(lut_texture, vec3<i32>(i1.x, i0.y, i0.z), 0).rgb;
+    let c010 = textureLoad(lut_texture, vec3<i32>(i0.x, i1.y, i0.z), 0).rgb;
+    let c110 = textureLoad(lut_texture, vec3<i32>(i1.x, i1.y, i0.z), 0).rgb;
+    let c001 = textureLoad(lut_texture, vec3<i32>(i0.x, i0.y, i1.z), 0).rgb;
+    let c101 = textureLoad(lut_texture, vec3<i32>(i1.x, i0.y, i1.z), 0).rgb;
+    let c011 = textureLoad(lut_texture, vec3<i32>(i0.x, i1.y, i1.z), 0).rgb;
+    let c111 = textureLoad(lut_texture, vec3<i32>(i1.x, i1.y, i1.z), 0).rgb;
+
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+
+    let c0 = mix(c00, c10, f.y);
+    let c1 = mix(c01, c11, f.y);
+
+    return vec4<f32>(mix(c0, c1, f.z) * params.max_pixel_value, pixel.a);
+}
+
 fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
     let bg = vec4<f32>(params.background.x, params.background.y, params.background.z, params.background.w) * params.max_pixel_value;
 
@@ -633,6 +678,10 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
             let c1 = sample_input_at(uv, jac);
             let c2 = sample_input_at(pt2, jac); // FIXME: jac should be adjusted for pt2
             pixel = c1 * alpha + c2 * (1.0 - alpha);
+            // Before the overlays, so drawing and the safe area keep their own
+            // colors. This branch returns early - forgetting it would leave part
+            // of the frame ungraded.
+            pixel = apply_color_lut(pixel);
             pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);
             pixel = draw_safe_area(pixel, p.x, p.y);
             return vec4<SCALAR>(pixel);
@@ -640,6 +689,7 @@ fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
 
         pixel = sample_input_at(uv, jac);
     }
+    pixel = apply_color_lut(pixel);
     pixel = draw_pixel(pixel, u32(p.x), u32(p.y), false);
     pixel = draw_safe_area(pixel, p.x, p.y);
     return vec4<SCALAR>(pixel);

@@ -14,7 +14,7 @@
 |---|---|
 | 0 — Reconhecimento | **Concluída.** `recon.md` + build limpo passando |
 | 1 — Parser `.cube` | **Concluída.** 13 testes, clippy limpo |
-| 2 — Upload GPU | **Metade.** Payload pronto; falta criar a textura em cada backend |
+| 2 — Upload GPU | **wgpu concluído.** Falta OpenCL e Qt RHI |
 | 3 — Shader do LUT | não iniciada |
 | 4 — Biblioteca de LUTs | não iniciada |
 | 5 — Ajustes por-pixel | não iniciada |
@@ -22,7 +22,7 @@
 | 7 — Export | não iniciada |
 
 Commits: `06e2bc56` (parser + recon), `edcf3257` (correção do build.rs),
-`2072ca1f` (layouts de textura).
+`2072ca1f` (layouts de textura), `bb518504` (estado), + o LUT no wgpu.
 
 ## O que existe
 
@@ -60,19 +60,61 @@ Custo: duas passagens de `sws` por frame, em CPU
 (`ffmpeg_video_converter.rs:50,54`). Em 4K vira provavelmente o gargalo do
 export. Só acontece com a feature ligada.
 
-## Próximo passo (Fase 2, segunda metade)
+## O que o wgpu já tem
 
-Criar a textura de fato, por backend:
+- `init_lut_texture` (`gpu/wgpu_interop.rs:44`) cria a textura 3D `Rgba32Float`.
+- Binding **6** no caminho de render e **7** no de buffer — os dois layouts
+  divergem porque o de buffer já usa o 6 para a saída (`wgpu.rs:317-345`).
+- `apply_color_lut` no `.wgsl`, chamado nos **dois** pontos de saída que carregam
+  pixel de imagem. Os outros dois retornos (`:621,634`) devolvem a cor de fundo
+  escolhida pelo usuário e **não devem** ser graduados.
+- `WgpuWrapper::set_lut` troca o LUT com um `write_texture`, sem recriar nada.
 
-- **wgpu**: padrão em `wgpu_interop.rs:50-64`; binding novo nos layouts em
-  `wgpu.rs:317-340` (hoje vão até o binding 5).
-- **OpenCL**: verificar `image3d_t` com sampler linear; se não houver, usar o
-  layout tiled que já está pronto.
+### Três decisões que mudaram o desenho
+
+**1. Não existe sampler neste projeto.** A recon supôs que um sampler linear daria
+a interpolação trilinear de graça. Não dá: todas as texturas são ligadas com
+`filterable: false` e lidas com `textureLoad` (`wgpu_undistort.wgsl:128`). O
+shader interpola à mão, espelhando `Lut::sample`. **O layout `Volume3D` perdeu
+sua vantagem sobre o `Tiled2D`** — a escolha entre eles agora é só sobre qual
+backend consegue amostrar textura 3D.
+
+**2. A textura é alocada no tamanho máximo (65³) e nunca redimensiona.** O bind
+group é montado uma vez, e refazê-lo exigiria reter buffers que o código descarta
+de propósito (`buf_coeffs`, `wgpu.rs:308`). Trocar de LUT vira um `write_texture`.
+Custo: ~4,4 MB fixos. LUTs maiores que 65 são **reduzidos** — o parser aceita até
+256 (`parser.rs:131`), e essa direção perde detalhe.
+
+**3. O LUT está sempre presente, com identidade quando nenhum foi carregado.** A
+chave de cache do pipeline (`stabilization/mod.rs:355`) **não inclui qual LUT
+está carregado**, então um binding que aparece e some exigiria uma segunda
+variante de pipeline. Com a identidade, o custo de "desligado" é um fetch de
+textura.
+
+## Próximo passo
+
+**OpenCL e Qt RHI ainda não têm LUT** — e isso importa mais do que parece: o
+OpenCL é tentado **primeiro** (`gpu/mod.rs:152-193`), então na maioria das
+máquinas o caminho que acabei de escrever nem roda. Sem eles a feature fica
+invisível para quase todo mundo.
+
+- **OpenCL**: verificar `image3d_t`; se não houver, usar o layout tiled pronto.
 - **Qt RHI**: shader GLSL próprio (`src/qt_gpu/undistort.frag`), com os `.qsb`
   recompilados por `src/qt_gpu/compiled/compile_shaders.sh`.
 
 Validação da fase: carregar um `.cube` e o log confirmar a textura criada no
-tamanho certo, sem erro de validação da API. **A imagem ainda não muda.**
+tamanho certo, sem erro de validação da API. **A imagem ainda não muda** — falta
+a Fase 3 ligar `set_lut` a uma UI, e o bloqueador YUV continua de pé: em material
+4:2:0 o shader recebe planos, não RGB, então o LUT só terá efeito correto depois
+da conversão para `RGBA16`.
+
+### Como isto é testado sem GPU
+
+`cargo test --lib gpu::wgpu` valida o WGSL com o `naga` (já é dependência) nas
+quatro variantes, e confere os índices de binding contra o que o layout declara.
+Verifiquei que os dois testes **falham** quando o índice é alterado de propósito
+— antes deles, um erro de binding só apareceria como falha de validação na
+máquina do usuário.
 
 ## Riscos, em ordem
 

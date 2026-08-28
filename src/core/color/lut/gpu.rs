@@ -110,6 +110,123 @@ pub fn build_tiled(lut: &Lut) -> Option<LutTexture> {
     Some(LutTexture { size: n as u32, data: out, layout: LutLayout::Tiled2D })
 }
 
+/// Cube edge the GPU texture is allocated at, regardless of the loaded LUT.
+///
+/// The bind group is built once, when the pipeline is created, and rebuilding it
+/// later would mean retaining buffers this code drops on purpose (`buf_coeffs`,
+/// `wgpu.rs:308`). Allocating for the largest LUT anyone ships instead makes a
+/// LUT swap a plain texture write, with the binding untouched.
+///
+/// 65 is the largest of the three sizes in common use (17, 33, 65); at
+/// `RGBA32F` the allocation is 65³·16 B ≈ 4.4 MB, negligible next to a 4K frame
+/// buffer.
+///
+/// The parser accepts up to 256 (`parser.rs:131`), so a larger table is
+/// **downsampled** here, and that direction does lose detail. It is a deliberate
+/// trade: such files are rare, and the alternative - allocating 256³·16 B ≈
+/// 268 MB for every session - is not worth paying on the common case.
+pub const MAX_LUT_SIZE: usize = 65;
+
+impl LutTexture {
+    /// Resamples the payload to [`MAX_LUT_SIZE`], for the fixed GPU allocation.
+    ///
+    /// Upsampling a LUT is lossless in the only sense that matters: the result
+    /// is trilinear interpolation of the source, which is exactly what the
+    /// shader would have computed from the smaller table. A 33³ LUT resampled to
+    /// 65³ and then sampled gives the same color as sampling the 33³ directly.
+    pub fn resampled_to_max(lut: &Lut, layout: LutLayout) -> Option<Self> {
+        if !lut.is_3d() { return None; }
+        let n = MAX_LUT_SIZE;
+        let last = (n - 1) as f32;
+        let mut data = vec![0.0f32; n * n * n * 4];
+
+        for b in 0..n {
+            for g in 0..n {
+                for r in 0..n {
+                    // Sample the source at this cell's position in 0..1, mapped
+                    // back through the domain so DOMAIN_MIN/MAX still apply.
+                    let pos = [r as f32 / last, g as f32 / last, b as f32 / last];
+                    let rgb = [
+                        lut.domain_min[0] + pos[0] * (lut.domain_max[0] - lut.domain_min[0]),
+                        lut.domain_min[1] + pos[1] * (lut.domain_max[1] - lut.domain_min[1]),
+                        lut.domain_min[2] + pos[2] * (lut.domain_max[2] - lut.domain_min[2]),
+                    ];
+                    let out = lut.sample(rgb);
+                    let dst = match layout {
+                        LutLayout::Volume3D => (r + g * n + b * n * n) * 4,
+                        LutLayout::Tiled2D  => (g * (n * n) + b * n + r) * 4,
+                    };
+                    data[dst]     = out[0];
+                    data[dst + 1] = out[1];
+                    data[dst + 2] = out[2];
+                    data[dst + 3] = 1.0;
+                }
+            }
+        }
+
+        Some(Self { size: n as u32, data, layout })
+    }
+
+    /// An identity LUT at the full allocation size, for when none is loaded.
+    pub fn identity_at_max(layout: LutLayout) -> Self {
+        let n = MAX_LUT_SIZE;
+        let last = (n - 1) as f32;
+        let mut data = vec![0.0f32; n * n * n * 4];
+        for b in 0..n {
+            for g in 0..n {
+                for r in 0..n {
+                    let dst = match layout {
+                        LutLayout::Volume3D => (r + g * n + b * n * n) * 4,
+                        LutLayout::Tiled2D  => (g * (n * n) + b * n + r) * 4,
+                    };
+                    data[dst]     = r as f32 / last;
+                    data[dst + 1] = g as f32 / last;
+                    data[dst + 2] = b as f32 / last;
+                    data[dst + 3] = 1.0;
+                }
+            }
+        }
+        Self { size: n as u32, data, layout }
+    }
+
+    /// The smallest LUT that changes nothing: the eight corners of the RGB cube.
+    ///
+    /// A bind group layout is fixed when the pipeline is built, and the pipeline
+    /// cache key does not include which LUT is loaded
+    /// (`stabilization/mod.rs:355`). So the binding cannot appear and disappear
+    /// with the feature - something must always occupy it. This is that
+    /// something: trilinear interpolation over these eight corners reproduces
+    /// the input exactly, so an unloaded LUT costs a texture fetch and nothing
+    /// else.
+    pub fn identity(layout: LutLayout) -> Self {
+        let mut data = Vec::with_capacity(8 * 4);
+        // The two layouts do not share a traversal order, not even at N=2: the
+        // cube runs blue-major, while the tiled image runs green-major, because
+        // one row of it holds the same green across every blue slice.
+        match layout {
+            LutLayout::Volume3D => {
+                for b in 0..2u32 {
+                    for g in 0..2u32 {
+                        for r in 0..2u32 {
+                            data.extend_from_slice(&[r as f32, g as f32, b as f32, 1.0]);
+                        }
+                    }
+                }
+            }
+            LutLayout::Tiled2D => {
+                for g in 0..2u32 {
+                    for b in 0..2u32 {
+                        for r in 0..2u32 {
+                            data.extend_from_slice(&[r as f32, g as f32, b as f32, 1.0]);
+                        }
+                    }
+                }
+            }
+        }
+        Self { size: 2, data, layout }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +277,51 @@ LUT_3D_SIZE 2
         let tiled = build_tiled(&lut).unwrap();
         assert_eq!(vol.data.len(), tiled.data.len(), "same payload, different order");
         assert_eq!(vol.byte_size(), tiled.byte_size());
+    }
+
+    #[test]
+    fn the_identity_matches_what_the_parser_produces() {
+        // The fallback LUT is hand-built, not parsed, so nothing guarantees it
+        // agrees with the real thing except a test. If the channel order drifts,
+        // "no LUT loaded" would silently mirror the colors.
+        let parsed = parse_cube_str(IDENTITY_2).unwrap();
+
+        let vol = LutTexture::identity(LutLayout::Volume3D);
+        assert_eq!(vol.data, build_volume(&parsed).unwrap().data);
+
+        let tiled = LutTexture::identity(LutLayout::Tiled2D);
+        assert_eq!(tiled.data, build_tiled(&parsed).unwrap().data);
+    }
+
+    #[test]
+    fn resampling_to_max_preserves_the_transform() {
+        // The claim that upsampling costs nothing only holds because the source
+        // is interpolated trilinearly and the shader would interpolate the same
+        // way. If resampled_to_max ever indexes wrong, this catches it.
+        let src = parse_cube_str(IDENTITY_2).unwrap();
+        let tex = LutTexture::resampled_to_max(&src, LutLayout::Volume3D).unwrap();
+        assert_eq!(tex.size as usize, MAX_LUT_SIZE);
+
+        let n = MAX_LUT_SIZE;
+        for &(r, g, b) in &[(0, 0, 0), (n - 1, 0, 0), (0, n - 1, 0), (0, 0, n - 1), (n / 2, n / 3, n - 1)] {
+            let dst = (r + g * n + b * n * n) * 4;
+            let last = (n - 1) as f32;
+            // An identity source must map each cell back to its own position.
+            for (ch, idx) in [(r, 0), (g, 1), (b, 2)] {
+                assert!((tex.data[dst + idx] - ch as f32 / last).abs() < 1e-5,
+                    "cell ({r},{g},{b}) channel {idx} drifted: {}", tex.data[dst + idx]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_max_size_identity_is_flat() {
+        let tex = LutTexture::identity_at_max(LutLayout::Volume3D);
+        let built = LutTexture::resampled_to_max(&parse_cube_str(IDENTITY_2).unwrap(), LutLayout::Volume3D).unwrap();
+        assert_eq!(tex.data.len(), built.data.len());
+        for (a, b) in tex.data.iter().zip(built.data.iter()) {
+            assert!((a - b).abs() < 1e-5, "identity shortcut disagrees with the resampled identity");
+        }
     }
 
     #[test]

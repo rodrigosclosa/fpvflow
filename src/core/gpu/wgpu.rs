@@ -34,6 +34,7 @@ pub struct WgpuWrapper  {
 
     in_texture: TextureHolder,
     out_texture: TextureHolder,
+    lut_texture: Option<wgpu::Texture>,
 
     pipeline: PipelineType,
     bind_group: Option<wgpu::BindGroup>,
@@ -58,6 +59,7 @@ impl Drop for WgpuWrapper {
         self.buf_drawing = None;
         self.in_texture = TextureHolder::default();
         self.out_texture = TextureHolder::default();
+        self.lut_texture = None;
         self.pipeline = PipelineType::None;
         self.bind_group = None;
 
@@ -320,6 +322,10 @@ impl WgpuWrapper {
                         wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(4096) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(drawing_len as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                        // The color LUT. Unfilterable because the shader reads it
+                        // with textureLoad and interpolates by hand, exactly like
+                        // every other texture here.
+                        wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
                     ],
                     label: None,
                 })
@@ -333,6 +339,9 @@ impl WgpuWrapper {
                         wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(drawing_len as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(in_size as _) }, count: None },
                         wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: wgpu::BufferSize::new(out_size as _) }, count: None },
+                        // The color LUT - see the render layout above. The buffer
+                        // path puts it at 7, since 6 is already the output buffer.
+                        wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D3, multisampled: false }, count: None },
                     ],
                     label: None,
                 })
@@ -394,6 +403,14 @@ impl WgpuWrapper {
                 }))
             };
 
+            // An identity LUT, overwritten later by set_lut. It has to exist now
+            // because the bind group is built once, here - and it is allocated at
+            // the maximum size so a later swap never resizes the texture, which
+            // would invalidate this bind group.
+            let lut = crate::color::lut::LutTexture::identity_at_max(crate::color::lut::LutLayout::Volume3D);
+            let lut_texture = init_lut_texture(&device, &queue, &lut);
+            let lut_view = lut_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
             let bind_group = match &pipeline {
                 PipelineType::None => None,
                 PipelineType::Render(p) => {
@@ -407,6 +424,7 @@ impl WgpuWrapper {
                             wgpu::BindGroupEntry { binding: 3, resource: buf_mesh_data.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 4, resource: buf_drawing.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&in_texture.wgpu_texture.as_ref().unwrap().create_view(&wgpu::TextureViewDescriptor::default())) },
+                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&lut_view) },
                         ],
                     }))
                 },
@@ -422,6 +440,7 @@ impl WgpuWrapper {
                             wgpu::BindGroupEntry { binding: 4, resource: buf_drawing.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 5, resource: in_texture.wgpu_buffer.as_ref().unwrap().as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 6, resource: out_texture.wgpu_buffer.as_ref().unwrap().as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&lut_view) },
                         ],
                     }))
                 }
@@ -433,6 +452,7 @@ impl WgpuWrapper {
                 staging_buffer: Some(staging_buffer),
                 out_texture,
                 in_texture,
+                lut_texture: Some(lut_texture),
                 buf_matrices: Some(buf_matrices),
                 buf_params: Some(buf_params),
                 buf_drawing: Some(buf_drawing),
@@ -449,6 +469,37 @@ impl WgpuWrapper {
         } else {
             Err(WgpuError::NoAvailableAdapter)
         }
+    }
+
+    /// Uploads a color LUT, replacing whatever the texture held.
+    ///
+    /// The payload is resampled to the fixed allocation size, so this never
+    /// resizes the texture and the bind group built in `new` stays valid.
+    /// Passing `None` restores the identity, which is what "no LUT loaded" means
+    /// to the shader - there is no separate off switch at this level.
+    pub fn set_lut(&mut self, lut: Option<&crate::color::lut::Lut>) -> bool {
+        use crate::color::lut::{ LutLayout, LutTexture };
+
+        let Some(texture) = self.lut_texture.as_ref() else {
+            log::error!("set_lut called with no LUT texture allocated");
+            return false;
+        };
+
+        let payload = match lut {
+            Some(l) => match LutTexture::resampled_to_max(l, LutLayout::Volume3D) {
+                Some(p) => p,
+                None => { log::error!("Only 3D LUTs can go to the GPU, got a 1D table"); return false; }
+            },
+            None => LutTexture::identity_at_max(LutLayout::Volume3D)
+        };
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            bytemuck::cast_slice(&payload.data),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(payload.bytes_per_row()), rows_per_image: Some(payload.height()) },
+            wgpu::Extent3d { width: payload.width(), height: payload.height(), depth_or_array_layers: payload.depth() }
+        );
+        true
     }
 
     pub fn undistort_image(&self, buffers: &mut Buffers, itm: &crate::stabilization::FrameTransform, drawing_buffer: &[u8]) -> bool {
@@ -556,6 +607,71 @@ impl WgpuWrapper {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs the same preprocessing `new` does, for one of the two variants.
+    fn preprocess(uses_textures: bool, scalar: &str) -> String {
+        let mut kernel = include_str!("wgpu_undistort.wgsl").to_string();
+        let model = DistortionModel::from_name("opencv_fisheye");
+        let mut fns = model.wgsl_functions().to_string();
+        fns.push_str("fn digital_undistort_point(uv: vec2<f32>) -> vec2<f32> { return uv; }
+                      fn digital_distort_point  (uv: vec2<f32>) -> vec2<f32> { return uv; }");
+        kernel = kernel.replace("LENS_MODEL_FUNCTIONS;", &fns);
+        kernel = kernel.replace("SCALAR", scalar);
+
+        let (open, close) = if uses_textures { ("{buffer_input}", "{/buffer_input}") } else { ("{texture_input}", "{/texture_input}") };
+        while let Some(pos) = kernel.find(open) {
+            kernel.replace_range(pos..kernel.find(close).unwrap() + close.len(), "");
+        }
+        kernel
+    }
+
+    /// The WGSL is only checked when a device compiles it, which no unit test
+    /// has - so a binding that does not match the layout in `new` would surface
+    /// as a runtime validation failure on a user's machine. naga is already a
+    /// dependency (`Cargo.toml:88`, feature `naga-ir`), so parsing and
+    /// validating here costs nothing and covers exactly that gap.
+    #[test]
+    fn the_shader_compiles_in_both_variants() {
+        for uses_textures in [true, false] {
+            for scalar in ["f32", "u32"] {
+                let src = preprocess(uses_textures, scalar);
+                let module = wgpu::naga::front::wgsl::parse_str(&src)
+                    .unwrap_or_else(|e| panic!("WGSL parse failed (textures={uses_textures}, {scalar}):\n{}", e.emit_to_string(&src)));
+
+                wgpu::naga::valid::Validator::new(
+                    wgpu::naga::valid::ValidationFlags::all(),
+                    wgpu::naga::valid::Capabilities::all(),
+                ).validate(&module)
+                    .unwrap_or_else(|e| panic!("WGSL validation failed (textures={uses_textures}, {scalar}): {e:?}"));
+            }
+        }
+    }
+
+    /// The LUT binding must survive compilation at the index the bind group
+    /// layout declares: 6 on the render path, 7 on the buffer path. Getting this
+    /// wrong is a pipeline creation error, not a wrong image, so it is worth
+    /// pinning down separately.
+    #[test]
+    fn the_lut_binding_index_matches_the_layout() {
+        for (uses_textures, expected) in [(true, 6u32), (false, 7u32)] {
+            let src = preprocess(uses_textures, "f32");
+            let module = wgpu::naga::front::wgsl::parse_str(&src).expect("parses");
+
+            let lut = module.global_variables.iter()
+                .find(|(_, v)| v.name.as_deref() == Some("lut_texture"))
+                .map(|(_, v)| v)
+                .expect("lut_texture must exist in both variants");
+
+            let binding = lut.binding.as_ref().expect("lut_texture must be bound");
+            assert_eq!(binding.binding, expected, "LUT binding index drifted (uses_textures={uses_textures})");
+            assert_eq!(binding.group, 0);
+        }
     }
 }
 

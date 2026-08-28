@@ -41,6 +41,48 @@ pub struct TextureHolder {
     pub wgpu_buffer: Option<wgpu::Buffer>
 }
 
+/// Creates and uploads the color LUT as a 3D texture.
+///
+/// `Rgba32Float` is not filterable on every adapter, and this project binds all
+/// its textures with `filterable: false` and reads them with `textureLoad`
+/// (`wgpu_undistort.wgsl:128`) - there is no sampler anywhere in the wgpu path.
+/// So no hardware interpolation is available to borrow: the shader fetches the
+/// eight surrounding texels and blends them itself, mirroring [`Lut::sample`].
+///
+/// The texture always exists, holding an identity LUT when the feature is off,
+/// because the bind group layout is frozen when the pipeline is built and the
+/// pipeline cache key (`stabilization/mod.rs:355`) does not include which LUT is
+/// loaded - a binding that came and went would need a second pipeline variant.
+///
+/// [`Lut::sample`]: crate::color::lut::Lut::sample
+pub fn init_lut_texture(device: &wgpu::Device, queue: &wgpu::Queue, lut: &crate::color::lut::LutTexture) -> wgpu::Texture {
+    let size = Extent3d { width: lut.width(), height: lut.height(), depth_or_array_layers: lut.depth() };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("color_lut"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[]
+    });
+
+    queue.write_texture(
+        TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: Origin3d::ZERO, aspect: TextureAspect::All },
+        bytemuck::cast_slice(&lut.data),
+        TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(lut.bytes_per_row()),
+            // A 3D write needs the slice pitch too, or only the first layer lands.
+            rows_per_image: Some(lut.height())
+        },
+        size
+    );
+
+    texture
+}
+
 pub fn init_texture(device: &wgpu::Device, backend: wgpu::Backend, buf: &BufferDescription, format: wgpu::TextureFormat, is_in: bool) -> TextureHolder {
     let usage = if is_in {
         wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
