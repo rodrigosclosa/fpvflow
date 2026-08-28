@@ -47,7 +47,7 @@ typedef struct {
     float pixel_value_limit;         // 16
     float light_refraction_coefficient; // 4
     int plane_index;                 // 8
-    float reserved1;                 // 12
+    float lut_amount;                // 12 - color LUT strength, 0..1
     float reserved2;                 // 16
     float4 ewa_coeffs_p;             // 16
     float4 ewa_coeffs_q;             // 16
@@ -589,6 +589,9 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 // Layout is RGBA, red varying fastest, matching Lut::to_rgba_f32 and the volume
 // layout in core/color/lut/gpu.rs.
 float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global KernelParams *params) {
+    // With no LUT loaded the amount is 0, and this skips eight fetches per pixel.
+    if (params->lut_amount <= 0.0f) { return pixel; }
+
     float last = (float)(n - 1);
 
     float3 rgb = clamp((float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value, 0.0f, 1.0f);
@@ -617,7 +620,9 @@ float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global 
 
     float3 c0 = mix(c00, c10, f.y);
     float3 c1 = mix(c01, c11, f.y);
-    float3 outv = mix(c0, c1, f.z) * params->max_pixel_value;
+    // Blended against the original, so the slider fades the grade in.
+    float3 graded = mix(c0, c1, f.z) * params->max_pixel_value;
+    float3 outv = mix((float3)(pixel.x, pixel.y, pixel.z), graded, params->lut_amount);
 
     return (float4)(outv.x, outv.y, outv.z, pixel.w);
 }

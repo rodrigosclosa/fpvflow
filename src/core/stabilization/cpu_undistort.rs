@@ -265,16 +265,18 @@ impl Stabilization {
         //
         // The pixel is in the pipeline's scale (0..max_pixel_value), not 0..1.
         #[inline]
-        fn apply_color_lut(px: &mut Vector4<f32>, lut: &crate::color::lut::Lut, max_pixel_value: f32) {
+        fn apply_color_lut(px: &mut Vector4<f32>, lut: &crate::color::lut::Lut, max_pixel_value: f32, amount: f32) {
+            if amount <= 0.0 { return; }
             let rgb = [
                 (px[0] / max_pixel_value).clamp(0.0, 1.0),
                 (px[1] / max_pixel_value).clamp(0.0, 1.0),
                 (px[2] / max_pixel_value).clamp(0.0, 1.0),
             ];
             let out = lut.sample(rgb);
-            px[0] = out[0] * max_pixel_value;
-            px[1] = out[1] * max_pixel_value;
-            px[2] = out[2] * max_pixel_value;
+            // Blended against the original, so the slider fades the grade in.
+            for ch in 0..3 {
+                px[ch] += (out[ch] * max_pixel_value - px[ch]) * amount;
+            }
         }
 
         fn rotate_point(pos: (f32, f32), angle: f32, origin: (f32, f32), origin2: (f32, f32)) -> (f32, f32) {
@@ -626,7 +628,7 @@ impl Stabilization {
                                     // Before remap_colorrange, which compresses to
                                     // limited range - the LUT domain is full range.
                                     // This branch returns early.
-                                    if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value); }
+                                    if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value, params.lut_amount); }
                                     if fix_range {
                                         remap_colorrange(&mut pixel, is_y)
                                     }
@@ -638,7 +640,7 @@ impl Stabilization {
                             }
                             // draw_pixel(&mut pixel, p.0 as i32, p.1 as i32, false, params.output_width, params, drawing);
 
-                            if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value); }
+                            if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value, params.lut_amount); }
                             if fix_range {
                                 remap_colorrange(&mut pixel, is_y)
                             }

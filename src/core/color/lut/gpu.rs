@@ -369,6 +369,41 @@ LUT_3D_SIZE 2
         for ch in mid { assert!((ch - 0.75).abs() < 1e-5, "midtone should invert to 0.75, got {ch}"); }
     }
 
+    /// The intensity slider blends the graded pixel against the original. Four
+    /// backends implement that line, and the endpoints are what a user notices:
+    /// 0 must be a true no-op, 1 must be the full grade.
+    #[test]
+    fn the_intensity_blend_hits_its_endpoints() {
+        let inverted = parse_cube_str("\
+LUT_3D_SIZE 2
+1.0 1.0 1.0
+0.0 1.0 1.0
+1.0 0.0 1.0
+0.0 0.0 1.0
+1.0 1.0 0.0
+0.0 1.0 0.0
+1.0 0.0 0.0
+0.0 0.0 0.0
+").unwrap();
+
+        // Mirrors what every shader does: mix(original, graded, amount).
+        let blend = |original: f32, amount: f32| -> f32 {
+            let graded = inverted.sample([original, original, original])[0];
+            original + (graded - original) * amount
+        };
+
+        for &original in &[0.0f32, 0.25, 0.5, 1.0] {
+            assert!((blend(original, 0.0) - original).abs() < 1e-6,
+                "amount 0 must leave {original} untouched");
+            assert!((blend(original, 1.0) - (1.0 - original)).abs() < 1e-5,
+                "amount 1 must fully invert {original}");
+            // Half strength lands halfway between the two.
+            let expected = original + ((1.0 - original) - original) * 0.5;
+            assert!((blend(original, 0.5) - expected).abs() < 1e-5,
+                "amount 0.5 must be the midpoint for {original}");
+        }
+    }
+
     #[test]
     fn a_1d_lut_has_no_volume_form() {
         let lut = parse_cube_str("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();

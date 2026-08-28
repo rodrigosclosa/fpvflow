@@ -180,6 +180,11 @@ pub struct Controller {
     get_color_lut_info: qt_method!(fn(&self) -> QString),
     /// Readable path of the loaded LUT, for display.
     get_color_lut_path: qt_method!(fn(&self) -> QString),
+    /// LUT strength, 0..1. Writing only updates a uniform - no re-upload.
+    set_color_lut_amount: qt_method!(fn(&mut self, amount: f64)),
+    get_color_lut_amount: qt_method!(fn(&self) -> f64),
+    /// Lists the `.cube` files in a folder, as a JSON array of `{name, url}`.
+    list_color_luts: qt_method!(fn(&self, folder_url: QString) -> QString),
 
     set_offset: qt_method!(fn(&self, timestamp_us: i64, offset_ms: f64)),
     remove_offset: qt_method!(fn(&self, timestamp_us: i64)),
@@ -1333,6 +1338,37 @@ impl Controller {
         let path = self.stabilizer.color_lut_path();
         if path.is_empty() { return QString::default(); }
         QString::from(gyroflow_core::filesystem::display_url(&path))
+    }
+
+    fn set_color_lut_amount(&mut self, amount: f64) {
+        self.stabilizer.set_color_lut_amount(amount as f32);
+        self.request_recompute();
+    }
+
+    fn get_color_lut_amount(&self) -> f64 {
+        self.stabilizer.color_lut_amount() as f64
+    }
+
+    fn list_color_luts(&self, folder_url: QString) -> QString {
+        let folder = folder_url.to_string();
+        if folder.is_empty() { return QString::default(); }
+
+        // list_folder returns directories too, so the extension filter is what
+        // keeps them out - and it is case-insensitive because .CUBE is common.
+        let mut entries: Vec<_> = gyroflow_core::filesystem::list_folder(&folder)
+            .into_iter()
+            .filter(|(name, _)| name.to_ascii_lowercase().ends_with(".cube"))
+            .map(|(name, url)| serde_json::json!({ "name": name, "url": url }))
+            .collect();
+
+        // Sorted by name: read_dir order is whatever the filesystem returns, and
+        // a list that reshuffles between launches is hard to use.
+        entries.sort_by(|a, b| {
+            let (x, y) = (a["name"].as_str().unwrap_or(""), b["name"].as_str().unwrap_or(""));
+            x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase())
+        });
+
+        QString::from(serde_json::Value::Array(entries).to_string())
     }
 
     fn get_color_lut_info(&self) -> QString {

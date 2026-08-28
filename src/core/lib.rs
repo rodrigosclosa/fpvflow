@@ -988,6 +988,12 @@ impl StabilizationManager {
     /// Removes the loaded LUT, restoring the identity table.
     pub fn clear_color_lut(&self) { self.stabilization.write().set_color_lut(None); }
 
+    /// Sets the LUT strength, 0..1.
+    pub fn set_color_lut_amount(&self, v: f32) { self.stabilization.write().set_color_lut_amount(v); }
+
+    /// Current LUT strength, 0..1.
+    pub fn color_lut_amount(&self) -> f32 { self.stabilization.read().color_lut_amount() }
+
     /// Path of the loaded LUT, or an empty string.
     pub fn color_lut_path(&self) -> String {
         self.stabilization.read().color_lut().map(|l| l.path.clone()).unwrap_or_default()

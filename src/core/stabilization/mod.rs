@@ -141,7 +141,7 @@ pub struct KernelParams {
     pub pixel_value_limit:        f32, // 16
     pub light_refraction_coefficient: f32, // 4
     pub plane_index:              i32, // 8
-    pub reserved1:                f32, // 12
+    pub lut_amount:               f32, // 12 - color LUT strength, 0..1
     pub reserved2:                f32, // 16
     pub ewa_coeffs_p:             [f32; 4], // 16
     pub ewa_coeffs_q:             [f32; 4], // 16
@@ -165,7 +165,6 @@ impl BackendType {
     pub fn is_wgpu(&self) -> bool { matches!(self, Self::Wgpu(_)) }
 }
 
-#[derive(Default)]
 pub struct Stabilization {
     pub stab_data: BTreeMap<i64, FrameTransform>,
 
@@ -209,7 +208,41 @@ pub struct Stabilization {
     color_lut_version: u64,
 
     /// `color_lut` resampled to the texture size, rebuilt once per change.
-    color_lut_payload: Option<crate::color::lut::LutTexture>
+    color_lut_payload: Option<crate::color::lut::LutTexture>,
+
+    /// LUT strength, 0..1. Reaches the shaders as `KernelParams::lut_amount`.
+    ///
+    /// Defaults to 1.0, not 0.0: a loaded LUT applies fully unless the user says
+    /// otherwise. This is why `Default` is written out below instead of derived -
+    /// every construction site uses `Stabilization::default()`, including the
+    /// export path, so a derived zero would silently hide every LUT there.
+    color_lut_amount: f32
+}
+
+impl Default for Stabilization {
+    fn default() -> Self {
+        Self {
+            stab_data: Default::default(),
+            size: Default::default(),
+            output_size: Default::default(),
+            interpolation: Default::default(),
+            kernel_flags: Default::default(),
+            #[cfg(feature = "use-opencl")]
+            cl: None,
+            wgpu: None,
+            initialized_backend: Default::default(),
+            compute_params: Default::default(),
+            drawing: Default::default(),
+            pending_device_change: None,
+            share_wgpu_instances: Default::default(),
+            cache_frame_transform: Default::default(),
+            next_backend: None,
+            color_lut: None,
+            color_lut_version: 0,
+            color_lut_payload: None,
+            color_lut_amount: 1.0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -274,6 +307,17 @@ impl Stabilization {
     pub fn color_lut(&self) -> Option<&crate::color::lut::Lut> {
         self.color_lut.as_deref()
     }
+
+    /// Sets the LUT strength, clamped to 0..1.
+    ///
+    /// Cheap on purpose: it only writes a uniform, so dragging the slider does not
+    /// re-upload the table or rebuild a pipeline.
+    pub fn set_color_lut_amount(&mut self, amount: f32) {
+        self.color_lut_amount = amount.clamp(0.0, 1.0);
+    }
+
+    /// Current LUT strength, 0..1.
+    pub fn color_lut_amount(&self) -> f32 { self.color_lut_amount }
 
     /// Version of the loaded LUT; 0 means none was ever set.
     pub fn color_lut_version(&self) -> u64 { self.color_lut_version }
@@ -343,6 +387,10 @@ impl Stabilization {
             transform.kernel_params.pixel_value_limit = 1.0;
             transform.kernel_params.max_pixel_value = 1.0;
         }
+        // Set here rather than in FrameTransform because the LUT belongs to this
+        // struct, not to the shared compute params - and every backend reads the
+        // transform built here, so one assignment covers all four.
+        transform.kernel_params.lut_amount = if self.color_lut.is_some() { self.color_lut_amount } else { 0.0 };
         transform.kernel_params.interpolation = self.interpolation as i32;
         transform.kernel_params.width  = self.size.0 as i32;
         transform.kernel_params.height = self.size.1 as i32;

@@ -2,6 +2,8 @@
 // Copyright © 2026 Rodrigo Sclosa
 
 import QtQuick
+// Namespaced because a bare FolderDialog is ambiguous - Qt ships two.
+import QtQuick.Dialogs as QQD
 
 import "../components/"
 
@@ -43,15 +45,36 @@ MenuItem {
     /// on Android the two are not interchangeable.
     function getSettings(): var {
         const url = controller.get_color_lut_url();
-        return url? { "url": url } : ({ });
+        return url? { "url": url, "amount": controller.get_color_lut_amount() } : ({ });
     }
 
     /// Restores from a project. Missing or empty keys leave the panel untouched,
     /// so older projects load unchanged.
     function loadGyroflow(obj: var): void {
         const o = obj.color_lut;
-        if (o && o.url) controller.load_color_lut_url(o.url);
+        if (!o || !o.url) return;
+        controller.load_color_lut_url(o.url);
+        // Before 100% was the only option, so a project without the key means
+        // full strength rather than none.
+        lutAmount.value = o.hasOwnProperty("amount")? +o.amount : 1.0;
     }
+
+    /// Folder scanned for the library dropdown. Global, not per project.
+    property string lutFolder: settings.value("lutFolder", "");
+
+    /// Rescans `lutFolder` and refreshes the dropdown.
+    ///
+    /// Called on load and after the folder changes, not on every repaint: it
+    /// touches the filesystem, and a folder of LUTs does not change while the
+    /// panel is open.
+    function refreshLibrary(): void {
+        if (!root.lutFolder) { libraryModel = []; return; }
+        const json = controller.list_color_luts(root.lutFolder);
+        libraryModel = json? JSON.parse(json) : [];
+    }
+    property var libraryModel: [];
+
+    Component.onCompleted: root.refreshLibrary();
 
     FileDialog {
         id: lutFileDialog;
@@ -59,6 +82,46 @@ MenuItem {
         nameFilters: [qsTr("LUT files") + " (*.cube *.CUBE)"];
         type: "lut";
         onAccepted: controller.load_color_lut(lutFileDialog.selectedFile);
+    }
+
+    // ---- Library ----
+    // A dropdown over a folder the user picks once, so the LUTs they actually
+    // use are two clicks away instead of a file dialog every time.
+    Label {
+        text: qsTr("Library");
+        visible: root.libraryModel.length > 0;
+        ComboBox {
+            id: library;
+            // Index 0 is the placeholder, so the list never starts on a LUT the
+            // user did not choose.
+            model: [qsTr("Choose a LUT...")].concat(root.libraryModel.map(x => x.name));
+            width: parent.width;
+            currentIndex: 0;
+            onCurrentIndexChanged: {
+                if (currentIndex > 0) {
+                    const item = root.libraryModel[currentIndex - 1];
+                    if (item) controller.load_color_lut_url(item.url);
+                }
+            }
+        }
+    }
+
+    QQD.FolderDialog {
+        id: lutFolderDialog;
+        title: qsTr("Choose the LUT folder");
+        onAccepted: {
+            root.lutFolder = selectedFolder.toString();
+            settings.setValue("lutFolder", root.lutFolder);
+            root.refreshLibrary();
+        }
+    }
+
+    Button {
+        text: root.lutFolder? qsTr("Change LUT folder") : qsTr("Set LUT folder");
+        iconName: "folder";
+        width: parent.width;
+        tooltip: qsTr("The .cube files in this folder are listed above. The folder is remembered between sessions.");
+        onClicked: lutFolderDialog.open();
     }
 
     Button {
@@ -112,11 +175,38 @@ MenuItem {
         visible: !!text;
     }
 
+    // Dragging this only rewrites a uniform - no re-upload, no pipeline rebuild -
+    // so it stays responsive while the preview redraws.
+    Label {
+        text: qsTr("Intensity");
+        visible: root.hasLut;
+        SliderWithField {
+            id: lutAmount;
+            // `value` is the unscaled 0..1 number the controller wants; `scaler`
+            // only affects the number shown in the field, which reads 0..100 %.
+            // Same split as marginPixels in Advanced.qml.
+            value: 1.0;
+            defaultValue: 100;
+            from: 0;
+            to: 1;
+            unit: "%";
+            precision: 0;
+            width: parent.width;
+            scaler: 100.0;
+            onValueChanged: controller.set_color_lut_amount(value);
+        }
+    }
+
     Button {
         text: qsTr("Remove LUT");
         iconName: "bin";
         width: parent.width;
         visible: root.hasLut;
-        onClicked: controller.clear_color_lut();
+        onClicked: {
+            controller.clear_color_lut();
+            // Back to the placeholder, otherwise the dropdown keeps naming a LUT
+            // that is no longer applied.
+            library.currentIndex = 0;
+        }
     }
 }

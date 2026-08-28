@@ -50,7 +50,7 @@ layout(std140, binding = 2) uniform KernelParams {
     float pixel_value_limit;        // 16
     float light_refraction_coefficient; // 4
     int plane_index;                // 8
-    float reserved1;                // 12
+    float lut_amount;               // 12 - color LUT strength, 0..1
     float reserved2;                // 16
     vec4 ewa_coefs_p;               // 16
     vec4 ewa_coefs_q;               // 16
@@ -185,9 +185,13 @@ vec2 rotate_point(vec2 pos, float angle, vec2 origin, vec2 origin2) {
 // the other three backends work in 0..255 / 0..1023 / 0..65535 and must
 // normalize first.
 vec4 apply_color_lut(vec4 pixel) {
+    // With no LUT loaded the amount is 0, and this skips the fetch entirely.
+    if (params.lut_amount <= 0.0) { return pixel; }
+
     float n = float(textureSize(texLut, 0).x);
     vec3 uvw = clamp(pixel.rgb, 0.0, 1.0) * ((n - 1.0) / n) + (0.5 / n);
-    return vec4(texture(texLut, uvw).rgb, pixel.a);
+    // Blended against the original, so the slider fades the grade in.
+    return vec4(mix(pixel.rgb, texture(texLut, uvw).rgb, params.lut_amount), pixel.a);
 }
 
 void main() {

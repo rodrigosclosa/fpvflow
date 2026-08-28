@@ -45,7 +45,7 @@ struct KernelParams {
     pixel_value_limit:        f32, // 16
     light_refraction_coefficient: f32, // 4
     plane_index:              i32, // 8
-    reserved1:                f32, // 12
+    lut_amount:               f32, // 12 - color LUT strength, 0..1
     reserved2:                f32, // 16
     ewa_coeffs_p:             vec4<f32>, // 16
     ewa_coeffs_q:             vec4<f32>, // 16
@@ -583,6 +583,10 @@ fn undistort_coord(position: vec2<f32>) -> vec2<f32> {
 // The input arrives in the pipeline's own scale (0..max_pixel_value), not 0..1,
 // so it is normalized before indexing and scaled back afterwards.
 fn apply_color_lut(pixel: vec4<f32>) -> vec4<f32> {
+    // With no LUT loaded the amount is 0, and this skips eight texture fetches
+    // per pixel - the identity table would have returned the input anyway.
+    if (params.lut_amount <= 0.0) { return pixel; }
+
     let n = i32(textureDimensions(lut_texture).x);
     let last = f32(n - 1);
 
@@ -611,7 +615,10 @@ fn apply_color_lut(pixel: vec4<f32>) -> vec4<f32> {
     let c0 = mix(c00, c10, f.y);
     let c1 = mix(c01, c11, f.y);
 
-    return vec4<f32>(mix(c0, c1, f.z) * params.max_pixel_value, pixel.a);
+    // Blended against the original, so the slider fades the grade in rather than
+    // switching it on. At 0 this returns the input bit for bit.
+    let graded = mix(c0, c1, f.z) * params.max_pixel_value;
+    return vec4<f32>(mix(pixel.rgb, graded, params.lut_amount), pixel.a);
 }
 
 fn undistort(position: vec2<f32>) -> vec4<SCALAR> {
