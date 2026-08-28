@@ -203,8 +203,11 @@ deploy *param:
         mkdir -p "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/camera_presets/"
         CARGO_TARGET="$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS"
         cp -Rf "$PROJECT_DIR/_deployment/mac/FPVFlow.app"    "$PROJECT_DIR/_deployment/_binaries/mac/"
-        cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/"
-        strip "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/gyroflow"
+        # Renamed on copy: cargo produces "gyroflow" (the crate name), but the bundle
+        # ships it as FPVFlow to match CFBundleExecutable. The two must agree or
+        # macOS cannot find the binary and the app will not launch.
+        cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow"
+        strip "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow"
         cp -Rf "$PROJECT_DIR/target/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/" || true
         cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/"
         # cp -Rf "$PROJECT_DIR/resources/camera_presets"        "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Resources/"
@@ -328,7 +331,7 @@ deploy *param:
                 -path "*/Headers/*" -or -path "*/A/Resources/*" -or -name "CodeResources" -or -name "module.modulemap" \) -type f | sort | xargs -r \
                 codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT
 
-            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/gyroflow
+            codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow
 
             codesign -vvvv --strict --options runtime --timestamp --force -s $SIGNING_FINGERPRINT $PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app
 
@@ -367,7 +370,7 @@ bundle *param:
     export PATH="/usr/libexec/:$PATH"
 
     cp -f "$PROJECT_DIR/_deployment/mac/FPVFlow.app/Contents/Info.plist" {{AppBundle}}/Contents/Info.plist
-    cp -f "$PROJECT_DIR/target/deploy/gyroflow" "{{AppBundle}}/Contents/MacOS/"
+    cp -f "$PROJECT_DIR/target/deploy/gyroflow" "{{AppBundle}}/Contents/MacOS/FPVFlow"
 
     if ! [ -z "$GITHUB_RUN_NUMBER" ]; then
         PlistBuddy -x -c "Set :CFBundleVersion \"`echo "{{ProjectVersion}}" | sed -E 's/[^0-9\.]//' | sed -E 's/\.([0-9]+)$/\1/'`.$GITHUB_RUN_NUMBER\"" {{AppBundle}}/Contents/Info.plist
@@ -418,7 +421,7 @@ bundle *param:
 
     actool {{ProjectDir}}/_deployment/ios/Resources/Images.xcassets --compile {{AppBundle}}/Contents --platform macosx --minimum-deployment-target 10.15 --app-icon AppIcon --output-partial-info-plist {{AppBundle}}/../AppIcon.plist
 
-    dsymutil {{AppBundle}}/Contents/MacOS/gyroflow -o {{AppBundle}}/../FPVFlow.app.dSYM
+    dsymutil {{AppBundle}}/Contents/MacOS/FPVFlow -o {{AppBundle}}/../FPVFlow.app.dSYM
     mkdir -p {{AppBundle}}/../Symbols
     xcrun symbols -noTextInSOD -noDaemon -arch all -symbolsPackageDir {{AppBundle}}/../Symbols {{AppBundle}}/../FPVFlow.app.dSYM
 
@@ -434,7 +437,7 @@ bundle *param:
         -path "*/Headers/*" -or -path "*/A/Resources/*" -or -name "CodeResources" -or -name "module.modulemap" \) -type f | sort | xargs -r \
         codesign -vvvv --strict --options runtime --timestamp --force -s $SIGN_KEY --entitlements {{AppBundle}}/../entitlements.xcent
 
-    codesign -vvvv --deep --strict --options runtime --timestamp --force -s $SIGN_KEY --entitlements {{AppBundle}}/../entitlements.xcent {{AppBundle}}/Contents/MacOS/gyroflow
+    codesign -vvvv --deep --strict --options runtime --timestamp --force -s $SIGN_KEY --entitlements {{AppBundle}}/../entitlements.xcent {{AppBundle}}/Contents/MacOS/FPVFlow
     codesign -vvvv --deep --strict --options runtime --timestamp --force -s $SIGN_KEY --entitlements {{AppBundle}}/../entitlements.xcent {{AppBundle}}
 
     PlistBuddy -x -c "Add :com.apple.application-identifier string {{TeamID}}.{{BundleIdentifier}}" {{AppBundle}}/../entitlements.xcent

@@ -4,7 +4,7 @@
 <dict>
     <key>CFBundleDevelopmentRegion</key>           <string>en</string>
     <key>CFBundleDisplayName</key>                 <string>FPVFlow</string>
-    <key>CFBundleExecutable</key>                  <string>gyroflow</string>
+    <key>CFBundleExecutable</key>                  <string>FPVFlow</string>
     <key>CFBundleIconFile</key>                    <string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>                  <string>xyz.fpvflow</string>
     <key>CFBundleInfoDictionaryVersion</key>       <string>6.0</string>
