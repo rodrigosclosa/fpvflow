@@ -1,7 +1,11 @@
 import 'common.just'
 
 TeamID                        := "RR3ZC2L4DF"
-BundleIdentifier              := "xyz.gyroflow"
+# Must match CFBundleIdentifier in _deployment/mac/FPVFlow.app/Contents/Info.plist,
+# which is what actually ships. This variable only feeds the entitlements during
+# signing, so the two disagreeing was harmless while there is no certificate -
+# and would have been a confusing failure the moment there was one.
+BundleIdentifier              := "xyz.fpvflow"
 DistributionCertificateSHA    := "58FE9D9FF561BF9910031999A8211A23858D1920"
 DistributionMacInstallerSHA   := "1029ED283BDA1E21F7ADBC891E95BCBFB102B952"
 DistributionProvisioning      := ProjectDir / "_deployment/mac/Gyroflow_mac_app_store.provisionprofile"
