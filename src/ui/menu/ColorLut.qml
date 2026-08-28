@@ -68,7 +68,7 @@ MenuItem {
         ]},
         { "title": qsTr("Efeito"), "items": [
             { "name": "sharpness",   "label": qsTr("Nitidez"),     "min": 0,    "unit": "%" },
-            { "name": "vignette",    "label": qsTr("Vignette"),    "min": -100, "unit": "%" }
+            { "name": "vignette",    "label": qsTr("Vignette"),    "min": 0,    "unit": "%" }
         ]}
     ];
 

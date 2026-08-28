@@ -89,7 +89,7 @@ pub struct ColorAdjustments {
     // --- Effect ---
     /// 0..100, neutral 0. Runs in the spatial stage, not the per-pixel one.
     pub sharpness: f32,
-    /// -100..100, neutral 0. Negative darkens the corners, positive lightens.
+    /// 0..100, neutral 0. Higher darkens the corners more.
     pub vignette: f32,
 }
 
@@ -126,7 +126,9 @@ impl ColorAdjustments {
     /// ignored so a project written by a newer version still loads.
     pub fn set(&mut self, name: &str, v: f32) {
         // Sharpness is the only one-sided control besides being 0..100.
-        let v = if name == "sharpness" { v.clamp(0.0, 100.0) } else { v.clamp(-100.0, 100.0) };
+        // Sharpness and vignette are one-sided: both mean "how much", and a
+        // negative value has no meaning for either.
+        let v = if name == "sharpness" || name == "vignette" { v.clamp(0.0, 100.0) } else { v.clamp(-100.0, 100.0) };
         match name {
             "exposure" => self.exposure = v, "luminance" => self.luminance = v,
             "contrast" => self.contrast = v, "highlights" => self.highlights = v,
@@ -292,7 +294,9 @@ pub fn apply(px: &mut Vector4<f32>, out_pos: (f32, f32), adjust: &[[f32; 4]; 4],
         // into the vignette this pixel is. Negative darkens, positive lightens,
         // and the centre is untouched either way because there 1 - v == 0.
         let v = smoothstep(k::VIGNETTE_OUTER, k::VIGNETTE_INNER, dx.hypot(dy) / (0.5f32 * aspect).hypot(0.5));
-        let factor = 1.0 + vignette * (1.0 - v);
+        // Higher value = darker corners, which is what the control means to a
+        // user. The centre is untouched either way, because there 1 - v == 0.
+        let factor = 1.0 - vignette * (1.0 - v);
         for ch in &mut c { *ch *= factor; }
     }
 
@@ -486,18 +490,19 @@ mod tests {
     }
 
     #[test]
-    fn the_vignette_is_bipolar_and_spares_the_centre() {
+    fn the_vignette_darkens_more_as_it_rises_and_spares_the_centre() {
         let mut center = px(0.8, 0.8, 0.8);
-        apply1(&mut center, "vignette", -80.0);
+        apply1(&mut center, "vignette", 80.0);
         assert!((center[0] - 0.8).abs() < 1e-5, "the centre must not change, got {}", center[0]);
 
-        let mut dark = px(0.8, 0.8, 0.8);
-        apply(&mut dark, (0.0, 0.0), &one("vignette", -80.0), 1.0, SIZE);
-        assert!(dark[0] < 0.5, "negative must darken the corner, got {}", dark[0]);
-
-        let mut light = px(0.4, 0.4, 0.4);
-        apply(&mut light, (0.0, 0.0), &one("vignette", 80.0), 1.0, SIZE);
-        assert!(light[0] > 0.4, "positive must lighten the corner, got {}", light[0]);
+        // Higher value, darker corner - the direction the control promises.
+        let corner_at = |amount: f32| {
+            let mut p = px(0.8, 0.8, 0.8);
+            apply(&mut p, (0.0, 0.0), &one("vignette", amount), 1.0, SIZE);
+            p[0]
+        };
+        assert!(corner_at(80.0) < corner_at(40.0), "more vignette must be darker");
+        assert!(corner_at(40.0) < corner_at(0.0), "any vignette must darken the corner");
     }
 
     #[test]

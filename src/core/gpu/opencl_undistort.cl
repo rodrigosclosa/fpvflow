@@ -711,7 +711,7 @@ float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelPara
         float aspect = size.x / fmax(size.y, 1.0f);
         float2 d = (float2)((out_pos.x / fmax(size.x, 1.0f) - 0.5f) * aspect, out_pos.y / fmax(size.y, 1.0f) - 0.5f);
         float v = smoothstep(VIGNETTE_OUTER, VIGNETTE_INNER, length(d) / length((float2)(0.5f * aspect, 0.5f)));
-        c *= 1.0f + vignette * (1.0f - v);
+        c *= 1.0f - vignette * (1.0f - v);
     }
 
     c = clamp(c, 0.0f, 1.0f) * params->max_pixel_value;

@@ -277,10 +277,32 @@ vec4 apply_color_adjustments(vec4 pixel, vec2 out_pos) {
         float aspect = size.x / max(size.y, 1.0);
         vec2 d = vec2((out_pos.x / max(size.x, 1.0) - 0.5) * aspect, out_pos.y / max(size.y, 1.0) - 0.5);
         float v = smoothstep(VIGNETTE_OUTER, VIGNETTE_INNER, length(d) / length(vec2(0.5 * aspect, 0.5)));
-        c *= 1.0 + vignette * (1.0 - v);
+        c *= 1.0 - vignette * (1.0 - v);
     }
 
     return vec4(clamp(c, 0.0, 1.0), pixel.a);
+}
+
+// Unsharp mask on the source neighbourhood.
+//
+// Same reasoning as the wgpu copy: the spec asks for sharpening on the
+// stabilized frame, but this shader can only reach the source, so the
+// neighbourhood is taken there and warped along with the centre pixel.
+vec4 apply_sharpness(vec4 pixel, vec2 uv, vec2 frame_size) {
+    float amount = params.color_adjust4.x;
+    if (amount <= 0.0) return pixel;
+
+    // One source pixel in each direction.
+    vec2 tx = 1.0 / max(frame_size, vec2(1.0));
+    vec2 c = vec2(uv.x / max(frame_size.x, 1.0), uv.y / max(frame_size.y, 1.0));
+    vec4 blur = (pixel * 4.0
+               + texture(texIn, c + vec2( tx.x, 0.0))
+               + texture(texIn, c + vec2(-tx.x, 0.0))
+               + texture(texIn, c + vec2(0.0,  tx.y))
+               + texture(texIn, c + vec2(0.0, -tx.y))) / 8.0;
+    // K caps the strength so 100 % is strong but not haloed.
+    vec4 sharpened = pixel + (pixel - blur) * (amount * 1.5);
+    return vec4(clamp(sharpened.rgb, 0.0, 1.0), pixel.a);
 }
 
 void main() {
@@ -392,7 +414,7 @@ void main() {
                 // Only when this is real image data - the background is the
                 // user's chosen color and stays ungraded. Before the overlays,
                 // and this branch returns early.
-                fragColor = apply_color_adjustments(apply_color_lut(fragColor), outPos);
+                fragColor = apply_color_adjustments(apply_color_lut(apply_sharpness(fragColor, uv, frame_size)), outPos);
             }
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
@@ -401,7 +423,7 @@ void main() {
         }
 
         if ((uv.x >= 0 && uv.x < frame_size.x) && (uv.y >= 0 && uv.y < frame_size.y)) {
-            fragColor = apply_color_adjustments(apply_color_lut(texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y))), outPos);
+            fragColor = apply_color_adjustments(apply_color_lut(apply_sharpness(texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y)), uv, frame_size)), outPos);
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
             draw_safe_area(fragColor, outPos.x, outPos.y);

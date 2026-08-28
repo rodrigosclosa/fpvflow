@@ -724,7 +724,7 @@ fn apply_color_adjustments(pixel: vec4<f32>, out_pos: vec2<f32>) -> vec4<f32> {
         let aspect = size.x / max(size.y, 1.0);
         let d = vec2<f32>((out_pos.x / max(size.x, 1.0) - 0.5) * aspect, out_pos.y / max(size.y, 1.0) - 0.5);
         let v = smoothstep(VIGNETTE_OUTER, VIGNETTE_INNER, length(d) / length(vec2<f32>(0.5 * aspect, 0.5)));
-        c *= 1.0 + vignette * (1.0 - v);
+        c *= 1.0 - vignette * (1.0 - v);
     }
 
     return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * params.max_pixel_value, pixel.a);
