@@ -592,9 +592,15 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 //
 // Layout is RGBA, red varying fastest, matching Lut::to_rgba_f32 and the volume
 // layout in core/color/lut/gpu.rs.
-float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global KernelParams *params) {
+// NOTE: takes and returns DATA_TYPEF, the pipeline's own pixel type. It is
+// float4 only for packed RGB formats - on planar YUV this kernel runs once per
+// plane and DATA_TYPEF is float or float2, so hardcoding float4 fails to
+// compile with "assigning to ushort from ushort4".
+DATA_TYPEF apply_color_lut(DATA_TYPEF pixel, __global const float *lut, int n, __global KernelParams *params) {
     // With no LUT loaded the amount is 0, and this skips eight fetches per pixel.
-    if (params->lut_amount <= 0.0f) { return pixel; }
+    // Only packed RGB has three channels in one call; on a planar pass there is
+    // nothing a 3D LUT can do, so leave the plane untouched.
+    if (params->lut_amount <= 0.0f || PIX_ELEMENT_COUNT < 3) { return pixel; }
 
     float last = (float)(n - 1);
 
@@ -628,7 +634,9 @@ float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global 
     float3 graded = mix(c0, c1, f.z) * params->max_pixel_value;
     float3 outv = mix((float3)(pixel.x, pixel.y, pixel.z), graded, params->lut_amount);
 
-    return (float4)(outv.x, outv.y, outv.z, pixel.w);
+    DATA_TYPEF outp = pixel;
+    outp.x = outv.x; outp.y = outv.y; outp.z = outv.z;
+    return outp;
 }
 
 // Per-pixel color adjustments, applied after the LUT.
@@ -659,7 +667,7 @@ float3 tonal_band(float3 c, float amount, float e0, float e1, bool invert) {
     return c + ((float3)(dest, dest, dest) - c) * w;
 }
 
-float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelParams *params) {
+DATA_TYPEF apply_color_adjustments(DATA_TYPEF pixel, float2 out_pos, __global KernelParams *params) {
     float exposure    = params->color_adjust1.x;
     float luminance   = params->color_adjust1.y;
     float contrast    = params->color_adjust1.z;
@@ -678,6 +686,8 @@ float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelPara
         tint == 0.0f && saturation == 0.0f && vibrance == 0.0f && vignette == 0.0f) {
         return pixel;
     }
+
+    if (PIX_ELEMENT_COUNT < 3) { return pixel; }
 
     float3 c = (float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value;
 
@@ -715,7 +725,9 @@ float4 apply_color_adjustments(float4 pixel, float2 out_pos, __global KernelPara
     }
 
     c = clamp(c, 0.0f, 1.0f) * params->max_pixel_value;
-    return (float4)(c.x, c.y, c.z, pixel.w);
+    DATA_TYPEF outp = pixel;
+    outp.x = c.x; outp.y = c.y; outp.z = c.z;
+    return outp;
 }
 
 __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstptr, __global const void *params_buf, __global const float *matrices, __global const uchar *drawing, __global const float *mesh_data, __global const float *lut) {

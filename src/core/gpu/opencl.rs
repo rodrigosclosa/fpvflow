@@ -203,6 +203,10 @@ impl OclWrapper {
                        .replace("DATA_CONVERT", ocl_names.1)
                        .replace("DATA_TYPE", ocl_names.0)
                        .replace("LUT_SIZE", &format!("{}", crate::color::lut::MAX_LUT_SIZE))
+                       // Channels per pixel in this pass. The colour functions need it:
+                       // on a planar YUV pass there is only luma or chroma in one call,
+                       // and a 3D LUT has nothing to work with.
+                       .replace("PIX_ELEMENT_COUNT", &format!("{}", params.pix_element_count))
                        .replace("PIXEL_BYTES", &format!("{}", params.bytes_per_pixel))
                        .replace("INTERPOLATION", &format!("{}", params.interpolation));
 

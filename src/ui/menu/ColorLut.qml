@@ -241,7 +241,7 @@ MenuItem {
         width: parent.width;
         wrapMode: Text.WordWrap;
         leftPadding: 0;
-        color: styleTextColorError;
+        color: "#f44";
         visible: !!text;
     }
 
