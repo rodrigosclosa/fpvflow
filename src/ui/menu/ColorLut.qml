@@ -193,6 +193,9 @@ MenuItem {
                 lutInfo.text = root.lutSummary(controller.get_color_lut_info());
                 lutPath.text = controller.get_color_lut_path();
                 lutError.text = ok? "" : error;
+                // Repaint: with the video paused nothing else triggers a new
+                // frame, so the LUT would only appear on the next seek.
+                window.videoArea.vid.forceRedraw();
             }
         }
     }
@@ -227,18 +230,19 @@ MenuItem {
         visible: root.hasLut;
         SliderWithField {
             id: lutAmount;
-            // `value` is the unscaled 0..1 number the controller wants; `scaler`
-            // only affects the number shown in the field, which reads 0..100 %.
-            // Same split as marginPixels in Advanced.qml.
+            // from/to are in the DISPLAYED scale (0..100 %), like marginPixels in
+            // Advanced.qml. `scaler` divides that back down, so `value` reaches
+            // the controller as 0..1. Setting from/to to 0..1 gives the slider a
+            // one-percent travel, which is the bug this replaced.
             value: 1.0;
             defaultValue: 100;
             from: 0;
-            to: 1;
+            to: 100;
             unit: "%";
             precision: 0;
             width: parent.width;
             scaler: 100.0;
-            onValueChanged: controller.set_color_lut_amount(value);
+            onValueChanged: { controller.set_color_lut_amount(value); window.videoArea.vid.forceRedraw(); }
         }
     }
 
@@ -271,67 +275,67 @@ MenuItem {
                 from: -2; to: 2; value: 0; defaultValue: 0;
                 unit: qsTr(" EV"); precision: 2;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("exposure", value);
+                onValueChanged: { controller.set_color_adjustment("exposure", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Contrast");
             SliderWithField {
                 id: adjContrast;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("contrast", value);
+                onValueChanged: { controller.set_color_adjustment("contrast", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Saturation");
             SliderWithField {
                 id: adjSaturation;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("saturation", value);
+                onValueChanged: { controller.set_color_adjustment("saturation", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Temperature");
             SliderWithField {
                 id: adjTemperature;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("temperature", value);
+                onValueChanged: { controller.set_color_adjustment("temperature", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Tint");
             SliderWithField {
                 id: adjTint;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("tint", value);
+                onValueChanged: { controller.set_color_adjustment("tint", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Highlights");
             SliderWithField {
                 id: adjHighlights;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("highlights", value);
+                onValueChanged: { controller.set_color_adjustment("highlights", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
             text: qsTr("Shadows");
             SliderWithField {
                 id: adjShadows;
-                from: -1; to: 1; value: 0; defaultValue: 0;
+                from: -100; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("shadows", value);
+                onValueChanged: { controller.set_color_adjustment("shadows", value); window.videoArea.vid.forceRedraw(); }
             }
         }
         Label {
@@ -340,10 +344,10 @@ MenuItem {
                 // One-sided: a negative vignette would brighten the corners,
                 // which is not what the control means.
                 id: adjVignette;
-                from: 0; to: 1; value: 0; defaultValue: 0;
+                from: 0; to: 100; value: 0; defaultValue: 0;
                 unit: "%"; precision: 0; scaler: 100.0;
                 width: parent.width;
-                onValueChanged: controller.set_color_adjustment("vignette", value);
+                onValueChanged: { controller.set_color_adjustment("vignette", value); window.videoArea.vid.forceRedraw(); }
             }
         }
 

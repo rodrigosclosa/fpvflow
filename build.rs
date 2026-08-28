@@ -247,8 +247,11 @@ fn main() {
             res.set_icon("resources/app_icon.ico");
             res.set("FileVersion", env!("CARGO_PKG_VERSION"));
             res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
-            res.set("ProductName", "Gyroflow");
-            res.set("FileDescription", &format!("Gyroflow v{}", env!("CARGO_PKG_VERSION")));
+            // The MDK license key is tied to the executable name and the bundle
+            // id, not to these strings (wang-bin/mdk-sdk#370). They are cosmetic
+            // here, but kept in step with the app's own name.
+            res.set("ProductName", "FPVFlow");
+            res.set("FileDescription", &format!("FPVFlow v{}", env!("CARGO_PKG_VERSION")));
             res.compile().unwrap();
         }
         tos => panic!("unknown target os {:?}!", tos)

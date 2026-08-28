@@ -291,6 +291,7 @@ impl Stabilization {
     /// a rebuild here would stall the preview on every slider move.
     pub fn set_color_lut(&mut self, lut: Option<std::sync::Arc<crate::color::lut::Lut>>) {
         self.color_lut = lut;
+        self.invalidate_color();
         // Saturating, not wrapping: 0 is reserved for "never set", and a wrap back
         // to it would make a changed LUT look unchanged.
         self.color_lut_version = self.color_lut_version.saturating_add(1);
@@ -337,10 +338,25 @@ impl Stabilization {
     /// re-upload the table or rebuild a pipeline.
     pub fn set_color_lut_amount(&mut self, amount: f32) {
         self.color_lut_amount = amount.clamp(0.0, 1.0);
+        self.invalidate_color();
     }
 
     /// Current LUT strength, 0..1.
     pub fn color_lut_amount(&self) -> f32 { self.color_lut_amount }
+
+    /// Drops the cached per-frame transforms so the new color values reach the
+    /// shaders.
+    ///
+    /// `ensure_stab_data_at_timestamp` reuses whatever is cached for a timestamp
+    /// and only rebuilds on a stride or rect change, so without this the uniforms
+    /// keep the values they had when the frame was first processed - the sliders
+    /// move and the image does not.
+    ///
+    /// Only the cache is cleared, not `initialized_backend`: the pipeline and the
+    /// bind group stay valid, since nothing here changes a texture size.
+    fn invalidate_color(&mut self) {
+        self.stab_data.clear();
+    }
 
     /// Sets one adjustment by name. Unknown names are ignored, which keeps a
     /// project written by a newer version from failing to load here.
@@ -354,8 +370,9 @@ impl Stabilization {
             "highlights"  => self.color_adjust2[1] = value.clamp(-1.0, 1.0),
             "shadows"     => self.color_adjust2[2] = value.clamp(-1.0, 1.0),
             "vignette"    => self.color_adjust2[3] = value.clamp(0.0, 1.0),
-            _ => log::warn!("Unknown color adjustment: {name}")
+            _ => { log::warn!("Unknown color adjustment: {name}"); return; }
         }
+        self.invalidate_color();
     }
 
     /// Reads one adjustment by name; 0.0 for an unknown one.
@@ -377,6 +394,7 @@ impl Stabilization {
     pub fn reset_color_adjustments(&mut self) {
         self.color_adjust1 = [0.0; 4];
         self.color_adjust2 = [0.0; 4];
+        self.invalidate_color();
     }
 
     /// Version of the loaded LUT; 0 means none was ever set.
