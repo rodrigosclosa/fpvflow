@@ -324,6 +324,51 @@ LUT_3D_SIZE 2
         }
     }
 
+    /// Every backend normalizes by `max_pixel_value` before indexing the LUT and
+    /// scales back afterwards, because the pipeline works in 0..255 / 0..1023 /
+    /// 0..65535 rather than 0..1. Four implementations of that step exist - WGSL,
+    /// OpenCL C, the CPU path and this one - and getting it wrong yields an image
+    /// that is merely a bit off, not obviously broken. This pins the contract.
+    #[test]
+    fn sampling_round_trips_through_the_pipeline_scale() {
+        let lut = parse_cube_str(IDENTITY_2).unwrap();
+
+        for max_pixel_value in [255.0f32, 1023.0, 65535.0] {
+            for level in [0.0f32, 0.25, 0.5, 1.0] {
+                let stored = level * max_pixel_value;
+                let normalized = (stored / max_pixel_value).clamp(0.0, 1.0);
+                let out = lut.sample([normalized, normalized, normalized]);
+                let back = out[0] * max_pixel_value;
+                assert!((back - stored).abs() < 0.01,
+                    "identity LUT changed {stored} at scale {max_pixel_value} (got {back})");
+            }
+        }
+    }
+
+    /// An inverting LUT must actually invert - proof that `sample` applies the
+    /// table rather than passing the input through, which an identity-only test
+    /// cannot distinguish.
+    #[test]
+    fn an_inverting_lut_inverts() {
+        let inverted = parse_cube_str("\
+LUT_3D_SIZE 2
+1.0 1.0 1.0
+0.0 1.0 1.0
+1.0 0.0 1.0
+0.0 0.0 1.0
+1.0 1.0 0.0
+0.0 1.0 0.0
+1.0 0.0 0.0
+0.0 0.0 0.0
+").unwrap();
+
+        assert_eq!(inverted.sample([0.0, 0.0, 0.0]), [1.0, 1.0, 1.0]);
+        assert_eq!(inverted.sample([1.0, 1.0, 1.0]), [0.0, 0.0, 0.0]);
+
+        let mid = inverted.sample([0.25, 0.25, 0.25]);
+        for ch in mid { assert!((ch - 0.75).abs() < 1e-5, "midtone should invert to 0.75, got {ch}"); }
+    }
+
     #[test]
     fn a_1d_lut_has_no_volume_form() {
         let lut = parse_cube_str("LUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();

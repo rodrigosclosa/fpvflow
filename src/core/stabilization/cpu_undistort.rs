@@ -230,7 +230,7 @@ impl Stabilization {
     // Adapted from OpenCV: initUndistortRectifyMap + remap
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
-    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8], mesh_data: &[f32]) -> bool {
+    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8], mesh_data: &[f32], color_lut: Option<&crate::color::lut::Lut>) -> bool {
         // #[cold]
         // fn draw_pixel(pix: &mut Vector4<f32>, x: i32, y: i32, is_input: bool, width: i32, params: &KernelParams, drawing: &[u8]) {
         //     if drawing.is_empty() || (params.flags & 8) == 0 { return; }
@@ -257,6 +257,24 @@ impl Stabilization {
             else    { *px *= 0.87843137; } // (240 - 16) / 255
             px[0] += 16.0;
             px[1] += 16.0;
+        }
+
+        // Applies the color LUT, reusing Lut::sample rather than reimplementing
+        // the interpolation - this path is plain Rust, so unlike the shaders it
+        // can call the tested code directly.
+        //
+        // The pixel is in the pipeline's scale (0..max_pixel_value), not 0..1.
+        #[inline]
+        fn apply_color_lut(px: &mut Vector4<f32>, lut: &crate::color::lut::Lut, max_pixel_value: f32) {
+            let rgb = [
+                (px[0] / max_pixel_value).clamp(0.0, 1.0),
+                (px[1] / max_pixel_value).clamp(0.0, 1.0),
+                (px[2] / max_pixel_value).clamp(0.0, 1.0),
+            ];
+            let out = lut.sample(rgb);
+            px[0] = out[0] * max_pixel_value;
+            px[1] = out[1] * max_pixel_value;
+            px[2] = out[2] * max_pixel_value;
         }
 
         fn rotate_point(pos: (f32, f32), angle: f32, origin: (f32, f32), origin2: (f32, f32)) -> (f32, f32) {
@@ -605,6 +623,10 @@ impl Stabilization {
                                     let c2 = sample_input_at::<I, T>(pt2, &jac, input, params, &bg, drawing); // FIXME: jac should be adjusted for pt2
                                     pixel = c1 * alpha + c2 * (1.0 - alpha);
                                     // draw_pixel(&mut pixel, p.0 as i32, p.1 as i32, false, params.output_width, params, drawing);
+                                    // Before remap_colorrange, which compresses to
+                                    // limited range - the LUT domain is full range.
+                                    // This branch returns early.
+                                    if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value); }
                                     if fix_range {
                                         remap_colorrange(&mut pixel, is_y)
                                     }
@@ -616,6 +638,7 @@ impl Stabilization {
                             }
                             // draw_pixel(&mut pixel, p.0 as i32, p.1 as i32, false, params.output_width, params, drawing);
 
+                            if let Some(lut) = color_lut { apply_color_lut(&mut pixel, lut, params.max_pixel_value); }
                             if fix_range {
                                 remap_colorrange(&mut pixel, is_y)
                             }
