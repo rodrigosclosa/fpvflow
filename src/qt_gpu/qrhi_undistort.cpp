@@ -255,7 +255,11 @@ public:
                 slice.setSourceSize(QSize(LUT_SIZE, LUT_SIZE));
                 entries.append(QRhiTextureUploadEntry(z, 0, slice));
             }
-            u->uploadTexture(m_texLut.get(), QRhiTextureUploadDescription(entries.cbegin(), entries.cend()));
+            // setEntries, not the constructor: only an initializer_list overload
+            // exists, and the slice count is a runtime value.
+            QRhiTextureUploadDescription lutDesc;
+            lutDesc.setEntries(entries.cbegin(), entries.cend());
+            u->uploadTexture(m_texLut.get(), lutDesc);
             m_pendingLut.clear();
         }
 

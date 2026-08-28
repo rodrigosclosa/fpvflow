@@ -254,7 +254,7 @@ impl Stabilization {
 
         #[cfg(feature = "use-opencl")]
         {
-            let mut apply = |cl: &mut opencl::OclWrapper| {
+            let apply = |cl: &mut opencl::OclWrapper| {
                 if let Err(e) = cl.set_lut(self.color_lut.as_deref()) {
                     log::error!("Failed to upload the color LUT to OpenCL: {e:?}");
                 }

@@ -91,22 +91,50 @@ está carregado**, então um binding que aparece e some exigiria uma segunda
 variante de pipeline. Com a identidade, o custo de "desligado" é um fetch de
 textura.
 
+## Os outros três caminhos
+
+**OpenCL** (tentado **primeiro** em `gpu/mod.rs:152-193`, então é o que roda na
+maioria das máquinas): o LUT vai como **buffer de float**, não `image3d_t`.
+Suporte a imagem 3D é opcional em OpenCL e exigiria checagem de capacidade com
+fallback tiled; como todo o resto do kernel já entra por ponteiro `__global` e a
+interpolação é explícita de qualquer jeito, o buffer evita a questão sem custo.
+
+**CPU**: o fallback roda o próprio undistort (`undistort_image_cpu`), não o
+`stabilize_spirv` — então chama `Lut::sample` direto, sem uma quarta
+reimplementação. Aplicado **antes do `remap_colorrange`**, que comprime para
+limited range enquanto o domínio do LUT é full range; a ordem não é
+intercambiável.
+
+**Qt RHI**: único backend com **sampler linear de verdade**, então a
+interpolação trilinear é do hardware. Isso exige a correção de meio texel
+(`apply_color_lut` no `.frag`): amostrar em 0 ou 1 cai na borda do texel, não no
+centro, e corta as pontas da tabela. Trabalha em 0..1, sem `max_pixel_value`.
+
+### O que mudou no build por causa do Qt
+
+Os 22 `.qsb` são binários pré-compilados e commitados, num container
+**versionado**: Qt 6.4 lê versão 6, Qt 6.7 escreve versão 9. Um único conjunto é
+embarcado para todas as plataformas, então o `QtVersion` do `_scripts/common.just`
+foi fixado em **6.7.3** — o upstream ainda mandava Linux e macOS x86_64 para
+6.4.3, mas o CI deste fork já forçava 6.7.3 no macOS. Recompilar:
+`cd src/qt_gpu/compiled && bash compile_shaders.sh`.
+
+`LUT_SIZE` é repetido em C++ (`qrhi_undistort.cpp`) porque um bloco `cpp!` não
+enxerga constante de Rust; há um `const _: () = assert!(...)` em
+`qrhi_undistort.rs` para travar a divergência em tempo de compilação.
+
+**Init falha se o dispositivo não tiver textura 3D.** Isso é só OpenGL ES 2.0, e
+a alternativa é pior: `controller.rs:1112` retorna `true` sem cair para outro
+backend, então uma falha silenciosa daria prévia em branco em vez de log.
+
 ## Próximo passo
 
-**OpenCL e Qt RHI ainda não têm LUT** — e isso importa mais do que parece: o
-OpenCL é tentado **primeiro** (`gpu/mod.rs:152-193`), então na maioria das
-máquinas o caminho que acabei de escrever nem roda. Sem eles a feature fica
-invisível para quase todo mundo.
+**Fase 3 — ligar `set_color_lut` a uma UI.** O núcleo está pronto nos quatro
+caminhos; nada disso é alcançável pelo usuário ainda.
 
-- **OpenCL**: verificar `image3d_t`; se não houver, usar o layout tiled pronto.
-- **Qt RHI**: shader GLSL próprio (`src/qt_gpu/undistort.frag`), com os `.qsb`
-  recompilados por `src/qt_gpu/compiled/compile_shaders.sh`.
-
-Validação da fase: carregar um `.cube` e o log confirmar a textura criada no
-tamanho certo, sem erro de validação da API. **A imagem ainda não muda** — falta
-a Fase 3 ligar `set_lut` a uma UI, e o bloqueador YUV continua de pé: em material
-4:2:0 o shader recebe planos, não RGB, então o LUT só terá efeito correto depois
-da conversão para `RGBA16`.
+E o **bloqueador YUV continua de pé**: em material 4:2:0 o shader recebe planos,
+não RGB, então o LUT só terá efeito correto depois da conversão para `RGBA16`
+descrita acima. Hoje o caminho só está certo para formatos que já chegam em RGB.
 
 ### Como isto é testado sem GPU
 
