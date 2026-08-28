@@ -9,7 +9,12 @@ ExtDir := ProjectDir / "ext"
 Arch := env("FORCE_ARCH", arch())
 
 # ――――――――――――――――――――――――――――――――――――――――― Qt ――――――――――――――――――――――――――――――――――――――――――
-QtVersion := env_var_or_default("FORCE_QT_VERSION", if os() == "windows" { "6.7.3" } else { if Arch == "aarch64" { "6.7.3" } else { "6.4.3" } })
+# FPVFlow uses 6.7.3 everywhere, where upstream still defaults x86_64 desktop to
+# 6.4.3. The compiled Qt RHI shaders in src/qt_gpu/compiled are a single set of
+# .qsb files shared by every platform, and the qsb format is versioned: 6.4 emits
+# and reads version 6, 6.7 emits version 9. Building them for the color LUT means
+# picking one, and 6.7.3 is what Windows, macOS CI and aarch64 already use.
+QtVersion := env_var_or_default("FORCE_QT_VERSION", "6.7.3")
 QtArch := if os() + Arch == "windowsx86_64"  { "msvc2019_64"
    } else if os() + Arch == "windowsaarch64" { "msvc2019_arm64"
    } else if os() == "macos"   { "macos"

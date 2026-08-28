@@ -14,7 +14,7 @@
 |---|---|
 | 0 — Reconhecimento | **Concluída.** `recon.md` + build limpo passando |
 | 1 — Parser `.cube` | **Concluída.** 13 testes, clippy limpo |
-| 2 — Upload GPU | **wgpu concluído.** Falta OpenCL e Qt RHI |
+| 2 — Upload GPU | **Concluída** nos quatro caminhos: wgpu, OpenCL, CPU e Qt RHI |
 | 3 — Shader do LUT | não iniciada |
 | 4 — Biblioteca de LUTs | não iniciada |
 | 5 — Ajustes por-pixel | não iniciada |

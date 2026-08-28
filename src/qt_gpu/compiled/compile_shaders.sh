@@ -1,5 +1,9 @@
 #!/bin/bash
-QSB='../../../ext/6.4.3/msvc2019_64/bin/qsb.exe --glsl "120,300 es,310 es,320 es,310,320,330,400,410,420" --hlsl 50 --msl 12'
+# 6.7.3, matching QtVersion in _scripts/common.just. The .qsb container is
+# versioned (6.4 writes version 6, 6.7 writes version 9) and a single set of
+# these files is shipped for every platform, so the version used here has to be
+# one every target's Qt can read.
+QSB='../../../ext/6.7.3/msvc2019_64/bin/qsb.exe --glsl "120,300 es,310 es,320 es,310,320,330,400,410,420" --hlsl 50 --msl 12'
 
 NO_DIGITAL_LENS="vec2 digital_undistort_point(vec2 uv) { return uv; } vec2 digital_distort_point(vec2 uv) { return uv; }"
 

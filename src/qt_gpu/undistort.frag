@@ -61,6 +61,9 @@ LENS_MODEL_FUNCTIONS;
 layout(binding = 3) uniform sampler2D texParams;
 layout(binding = 4) uniform sampler2D texCanvas;
 layout(binding = 5) uniform sampler2D texMeshData;
+// The color LUT. Always bound - an identity table when none is loaded - because
+// the shader resource bindings are fixed when the pipeline is built.
+layout(binding = 6) uniform sampler3D texLut;
 
 const vec4 colors[9] = vec4[9](
     vec4(0.0,   0.0,   0.0,     0.0), // None
@@ -170,6 +173,23 @@ vec2 rotate_point(vec2 pos, float angle, vec2 origin, vec2 origin2) {
      return vec2(cos(angle) * (pos.x - origin.x) - sin(angle) * (pos.y - origin.y) + origin2.x,
                  sin(angle) * (pos.x - origin.x) + cos(angle) * (pos.y - origin.y) + origin2.y);
 }
+// Applies the color LUT.
+//
+// Unlike the wgpu and OpenCL paths, this one has a real linear sampler, so the
+// trilinear interpolation is done by the hardware. That needs the half-texel
+// correction: sampling at exactly 0 or 1 lands on a texel edge, not a texel
+// centre, which clips the ends of the table. The scale/offset below maps 0..1
+// onto the centres of the first and last texels.
+//
+// This path is RGBA8 in 0..1, so there is no max_pixel_value division here -
+// the other three backends work in 0..255 / 0..1023 / 0..65535 and must
+// normalize first.
+vec4 apply_color_lut(vec4 pixel) {
+    float n = float(textureSize(texLut, 0).x);
+    vec3 uvw = clamp(pixel.rgb, 0.0, 1.0) * ((n - 1.0) / n) + (0.5 / n);
+    return vec4(texture(texLut, uvw).rgb, pixel.a);
+}
+
 void main() {
     vec2 texPos = v_texcoord.xy * vec2(params.output_width, params.output_height) + params.translation2d;
     vec2 outPos = v_texcoord.xy * vec2(params.output_width, params.output_height);
@@ -275,6 +295,11 @@ void main() {
             fragColor.a = 1.0;
             if (!((pt2.x >= 0 && pt2.x < params.width) && (pt2.y >= 0 && pt2.y < params.height))) {
                 fragColor = params.background;
+            } else {
+                // Only when this is real image data - the background is the
+                // user's chosen color and stays ungraded. Before the overlays,
+                // and this branch returns early.
+                fragColor = apply_color_lut(fragColor);
             }
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
@@ -283,7 +308,7 @@ void main() {
         }
 
         if ((uv.x >= 0 && uv.x < frame_size.x) && (uv.y >= 0 && uv.y < frame_size.y)) {
-            fragColor = texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y));
+            fragColor = apply_color_lut(texture(texIn, vec2(uv.x / frame_size.x, uv.y / frame_size.y)));
             draw_pixel(fragColor, uv.x, uv.y, true);
             draw_pixel(fragColor, outPos.x, outPos.y, false);
             draw_safe_area(fragColor, outPos.x, outPos.y);

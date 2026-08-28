@@ -198,7 +198,18 @@ pub struct Stabilization {
     /// a cache eviction - and it can also live in the shared thread-local cache
     /// instead of `self.wgpu`. This is the copy that survives, and it is
     /// re-applied whenever a backend is initialized.
-    color_lut: Option<std::sync::Arc<crate::color::lut::Lut>>
+    color_lut: Option<std::sync::Arc<crate::color::lut::Lut>>,
+
+    /// Bumped on every change to `color_lut`.
+    ///
+    /// The Qt RHI preview lives on the render thread and cannot borrow the table,
+    /// so it keeps its own uploaded copy; comparing versions tells it whether the
+    /// ~4 MB payload actually needs to cross again. 0 means "never set", which is
+    /// the identity table every backend starts with.
+    color_lut_version: u64,
+
+    /// `color_lut` resampled to the texture size, rebuilt once per change.
+    color_lut_payload: Option<crate::color::lut::LutTexture>
 }
 
 #[derive(Debug)]
@@ -224,6 +235,11 @@ impl Stabilization {
     /// a rebuild here would stall the preview on every slider move.
     pub fn set_color_lut(&mut self, lut: Option<std::sync::Arc<crate::color::lut::Lut>>) {
         self.color_lut = lut;
+        // Saturating, not wrapping: 0 is reserved for "never set", and a wrap back
+        // to it would make a changed LUT look unchanged.
+        self.color_lut_version = self.color_lut_version.saturating_add(1);
+        self.color_lut_payload = self.color_lut.as_deref()
+            .and_then(|l| crate::color::lut::LutTexture::resampled_to_max(l, crate::color::lut::LutLayout::Volume3D));
 
         if let Some(ref mut wgpu) = self.wgpu {
             wgpu.set_lut(self.color_lut.as_deref());
@@ -257,6 +273,18 @@ impl Stabilization {
     /// The currently loaded color LUT, if any.
     pub fn color_lut(&self) -> Option<&crate::color::lut::Lut> {
         self.color_lut.as_deref()
+    }
+
+    /// Version of the loaded LUT; 0 means none was ever set.
+    pub fn color_lut_version(&self) -> u64 { self.color_lut_version }
+
+    /// The LUT resampled to the fixed texture size, ready to upload.
+    ///
+    /// Cached, because the Qt preview reads it on the render thread every frame:
+    /// resampling 65³ texels per frame would be pure waste, and the table only
+    /// changes on user action.
+    pub fn color_lut_payload(&self) -> Option<&crate::color::lut::LutTexture> {
+        self.color_lut_payload.as_ref()
     }
 
     fn get_rect(desc: &BufferDescription) -> [i32; 4] {

@@ -15,6 +15,11 @@
 
 #define qDebug2(func) QMessageLogger(__FILE__, __LINE__, func).debug(QLoggingCategory("Qt RHI"))
 
+// Cube edge of the color LUT texture. Must match MAX_LUT_SIZE in
+// core/color/lut/gpu.rs - the Rust side resamples every table to this size so
+// the texture is allocated once and a LUT swap is a plain upload.
+static constexpr int LUT_SIZE = 65;
+
 class MDKPlayer {
 public:
     QSGDefaultRenderContext *rhiContext();
@@ -116,6 +121,42 @@ public:
         m_meshDataSampler.reset(rhi->newSampler(QRhiSampler::Nearest, QRhiSampler::Nearest, QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
         if (!m_meshDataSampler->create()) { qDebug2("init") << "failed to create m_meshDataSampler"; return false; }
 
+        // The color LUT, always present so the bindings stay fixed. Unlike the
+        // wgpu and OpenCL paths this one has a real linear sampler, so the
+        // trilinear interpolation is free - the shader only has to correct for
+        // texel centres.
+        // A failure here is fatal to the preview, not just to grading: the caller
+        // in controller.rs returns true without falling back to another backend,
+        // so the frame would simply never be drawn. 3D textures are absent only
+        // on OpenGL ES 2.0 - no desktop target this fork ships - but the check
+        // stays so the reason appears in the log instead of a blank preview.
+        if (!rhi->isFeatureSupported(QRhi::ThreeDimensionalTextures)) {
+            qDebug2("init") << "3D textures unsupported on this device, cannot build the color LUT pipeline";
+            return false;
+        }
+        m_texLut.reset(rhi->newTexture(QRhiTexture::RGBA32F, LUT_SIZE, LUT_SIZE, LUT_SIZE, 1, QRhiTexture::ThreeDimensional));
+        if (!m_texLut->create()) { qDebug2("init") << "failed to create m_texLut"; return false; }
+
+        m_lutSampler.reset(rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge));
+        if (!m_lutSampler->create()) { qDebug2("init") << "failed to create m_lutSampler"; return false; }
+
+        // An identity table, so "no LUT loaded" needs no separate code path.
+        {
+            QByteArray identity(LUT_SIZE * LUT_SIZE * LUT_SIZE * 4 * int(sizeof(float)), Qt::Uninitialized);
+            float *p = reinterpret_cast<float *>(identity.data());
+            const float last = float(LUT_SIZE - 1);
+            for (int b = 0; b < LUT_SIZE; ++b)
+                for (int g = 0; g < LUT_SIZE; ++g)
+                    for (int r = 0; r < LUT_SIZE; ++r) {
+                        const int i = (r + g * LUT_SIZE + b * LUT_SIZE * LUT_SIZE) * 4;
+                        p[i + 0] = float(r) / last;
+                        p[i + 1] = float(g) / last;
+                        p[i + 2] = float(b) / last;
+                        p[i + 3] = 1.0f;
+                    }
+            m_pendingLut = identity;
+        }
+
         m_srb.reset(rhi->newShaderResourceBindings());
         m_srb->setBindings({
             QRhiShaderResourceBinding::uniformBuffer (0, QRhiShaderResourceBinding::FragmentStage | QRhiShaderResourceBinding::VertexStage, m_drawingUniform.get()),
@@ -124,6 +165,7 @@ public:
             QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage, m_texMatrices.get(), m_matricesSampler.get()),
             QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage, m_texCanvas.get(), m_canvasSampler.get()),
             QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage, m_texMeshData.get(), m_meshDataSampler.get()),
+            QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage, m_texLut.get(), m_lutSampler.get()),
         });
         if (!m_srb->create()) { qDebug2("init") << "failed to create m_srb"; return false; }
 
@@ -150,6 +192,19 @@ public:
 
         return true;
     }
+
+    // Queues a new color LUT for upload on the next render.
+    //
+    // `version` identifies the table the caller holds; the payload is only copied
+    // when it differs from what was last queued, since it is ~4 MB and the LUT
+    // changes on user action, not per frame. Version 0 means the identity table
+    // installed at init.
+    void setLut(const float *data, uint len, uint64_t version) {
+        if (version == m_lutVersion) return;
+        m_lutVersion = version;
+        m_pendingLut = QByteArray(reinterpret_cast<const char *>(data), int(len * sizeof(float)));
+    }
+    uint64_t lutVersion() const { return m_lutVersion; }
 
     bool render(MDKPlayer *item, uint8_t *params, uint paramsLen, uint8_t *matrices, uint matricesLen, uint8_t *canvas, uint canvasLen, float *meshData, uint meshDataLen) {
         if (!item->qmlItem() || !item->rhiTexture() || !item->qmlWindow()) return false;
@@ -186,6 +241,22 @@ public:
         if (canvasLen > 0) {
             QRhiTextureSubresourceUploadDescription desc2(canvas, canvasLen);
             u->uploadTexture(m_texCanvas.get(), QRhiTextureUploadDescription({ QRhiTextureUploadEntry(0, 0, desc2) }));
+        }
+
+        // A 3D texture uploads one depth slice per layer, so this is LUT_SIZE
+        // entries rather than one. Only when a new table arrived - the LUT does
+        // not change per frame, and re-uploading 4 MB every frame would be a
+        // needless cost on the render thread.
+        if (!m_pendingLut.isEmpty()) {
+            const int sliceBytes = LUT_SIZE * LUT_SIZE * 4 * int(sizeof(float));
+            QVarLengthArray<QRhiTextureUploadEntry, LUT_SIZE> entries;
+            for (int z = 0; z < LUT_SIZE; ++z) {
+                QRhiTextureSubresourceUploadDescription slice(m_pendingLut.constData() + z * sliceBytes, sliceBytes);
+                slice.setSourceSize(QSize(LUT_SIZE, LUT_SIZE));
+                entries.append(QRhiTextureUploadEntry(z, 0, slice));
+            }
+            u->uploadTexture(m_texLut.get(), QRhiTextureUploadDescription(entries.cbegin(), entries.cend()));
+            m_pendingLut.clear();
         }
 
         QMatrix4x4 mvp = item->textureMatrix();
@@ -246,6 +317,12 @@ public:
     QScopedPointer<QRhiSampler> m_drawingSampler;
     QScopedPointer<QRhiSampler> m_matricesSampler;
     QScopedPointer<QRhiSampler> m_meshDataSampler;
+    QScopedPointer<QRhiTexture> m_texLut;
+    QScopedPointer<QRhiSampler> m_lutSampler;
+    // Set when a new LUT is waiting to be uploaded on the render thread, which is
+    // the only place a QRhi resource update may be recorded.
+    QByteArray m_pendingLut;
+    uint64_t m_lutVersion{0};
     QScopedPointer<QRhiShaderResourceBindings> m_srb;
     QScopedPointer<QRhiGraphicsPipeline> m_pipeline;
 

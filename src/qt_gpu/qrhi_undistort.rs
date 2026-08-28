@@ -13,6 +13,11 @@ cpp! {{
     #include "src/qt_gpu/qrhi_undistort.cpp"
 }}
 
+// LUT_SIZE is spelled out again in qrhi_undistort.cpp, because a cpp! block
+// cannot see Rust constants. If they ever disagree the texture and the payload
+// would differ in size, so pin it here rather than discovering it at runtime.
+const _: () = assert!(gyroflow_core::color::lut::MAX_LUT_SIZE == 65);
+
 pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width: u32, height: u32, stab: Arc<StabilizationManager>, buffers: &mut Buffers) -> Option<ProcessedInfo> {
     if stab.prevent_recompute.load(std::sync::atomic::Ordering::SeqCst) { return None; }
 
@@ -55,10 +60,21 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width:
 
             let size_for_rs = if (itm.kernel_params.flags & 16) == 16 { itm.kernel_params.width } else { itm.kernel_params.height } as u32;
 
+            // The payload is cached in the core, so this is a borrow, not a
+            // resample. C++ compares the version and copies only when the table
+            // actually changed - including after a resize, which rebuilds the
+            // pipeline and resets its version to 0, re-uploading on its own.
+            let lut_version = undist.color_lut_version();
+            let lut_payload = undist.color_lut_payload();
+            let (lut_ptr, lut_len) = match &lut_payload {
+                Some(p) => (p.data.as_ptr(), p.data.len() as u32),
+                None => (std::ptr::null(), 0u32)
+            };
+
             let canvas_size = undist.drawing.get_size();
             let canvas_size = QSize { width: canvas_size.0 as u32, height: canvas_size.1 as u32 };
 
-            let ok = cpp!(unsafe [mdkplayer as "MDKPlayerWrapper *", output_size as "QSize", shader_path as "QString", width as "uint32_t", height as "uint32_t", params_ptr as "uint8_t*", matrices_ptr as "uint8_t*", canvas_ptr as "uint8_t*", mesh_data_ptr as "float*", mesh_data_len as "uint32_t", matrices_len as "uint32_t", params_len as "uint32_t", canvas_len as "uint32_t", canvas_size as "QSize", size_for_rs as "uint32_t"] -> bool as "bool" {
+            let ok = cpp!(unsafe [mdkplayer as "MDKPlayerWrapper *", output_size as "QSize", shader_path as "QString", width as "uint32_t", height as "uint32_t", params_ptr as "uint8_t*", matrices_ptr as "uint8_t*", canvas_ptr as "uint8_t*", mesh_data_ptr as "float*", mesh_data_len as "uint32_t", matrices_len as "uint32_t", params_len as "uint32_t", canvas_len as "uint32_t", canvas_size as "QSize", size_for_rs as "uint32_t", lut_ptr as "const float*", lut_len as "uint32_t", lut_version as "uint64_t"] -> bool as "bool" {
                 if (!mdkplayer || !mdkplayer->mdkplayer || shader_path.isEmpty() || output_size.isEmpty()) return false;
 
                 auto rhiUndistortion = static_cast<QtRHIUndistort *>(mdkplayer->mdkplayer->userData());
@@ -94,6 +110,10 @@ pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width:
                     mdkplayer->mdkplayer->setUserDataDestructor([](void *ptr) {
                         delete static_cast<QtRHIUndistort *>(ptr);
                     });
+                }
+
+                if (lut_ptr && lut_len > 0) {
+                    rhiUndistortion->setLut(lut_ptr, lut_len, lut_version);
                 }
 
                 return rhiUndistortion->render(mdkplayer->mdkplayer, params_ptr, params_len, matrices_ptr, matrices_len, canvas_ptr, canvas_len, mesh_data_ptr, mesh_data_len);
