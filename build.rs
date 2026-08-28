@@ -247,9 +247,11 @@ fn main() {
             res.set_icon("resources/app_icon.ico");
             res.set("FileVersion", env!("CARGO_PKG_VERSION"));
             res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
-            // The MDK license key is tied to the executable name and the bundle
-            // id, not to these strings (wang-bin/mdk-sdk#370). They are cosmetic
-            // here, but kept in step with the app's own name.
+            // NOT cosmetic: on Windows the MDK license key is bound to the app id
+            // "ProductName/CompanyName" read from this resource block
+            // (wang-bin/appkey README). Changing either invalidates a key issued
+            // for the old pair, so whatever key we request has to be requested
+            // for exactly what is set here - currently "FPVFlow/".
             res.set("ProductName", "FPVFlow");
             res.set("FileDescription", &format!("FPVFlow v{}", env!("CARGO_PKG_VERSION")));
             res.compile().unwrap();
