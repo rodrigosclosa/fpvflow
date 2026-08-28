@@ -51,8 +51,27 @@ install-deps:
     # ――――――――――――――――――――――――――――――――――――――― FFmpeg ――――――――――――――――――――――――――――――――――――――――
     if (-not (Test-Path -Path "{{FFmpeg}}")) {
         echo "Downloading {{FFmpeg}}"
-        wget "https://master.dl.sourceforge.net/project/avbuild/windows-desktop/{{FFmpeg}}.7z?viasf=1" -outfile "{{FFmpeg}}.7z"
+        # SourceForge answers with an HTML page instead of the archive often
+        # enough that this needs checking: the old code fed that page to 7z and
+        # then deleted it, so the log said "not an archive" with nothing left to
+        # inspect. The mirror is tried first, master.dl second.
+        $ffmpegOk = $false
+        foreach ($url in @(
+            "https://downloads.sourceforge.net/project/avbuild/windows-desktop/{{FFmpeg}}.7z",
+            "https://master.dl.sourceforge.net/project/avbuild/windows-desktop/{{FFmpeg}}.7z?viasf=1"
+        )) {
+            try { curl.exe -sSL --retry 3 --retry-delay 5 -o "{{FFmpeg}}.7z" "$url" } catch { continue }
+            if (-not (Test-Path "{{FFmpeg}}.7z")) { continue }
+            # A 7z archive starts with "7z\xBC\xAF\x27\x1C"; an HTML error page
+            # does not. Checking the magic beats checking the size.
+            $magic = [System.IO.File]::ReadAllBytes((Resolve-Path "{{FFmpeg}}.7z"))[0..1]
+            if ($magic[0] -eq 0x37 -and $magic[1] -eq 0x7A) { $ffmpegOk = $true; break }
+            echo "  $url did not return an archive, trying the next mirror"
+            del "{{FFmpeg}}.7z"
+        }
+        if (-not $ffmpegOk) { throw "Could not download {{FFmpeg}}.7z - every mirror returned something that is not a 7z archive" }
         7z x -y {{FFmpeg}}.7z
+        if ($LASTEXITCODE -ne 0) { throw "Failed to extract {{FFmpeg}}.7z" }
         del {{FFmpeg}}.7z
     }
     # ――――――――――――――――――――――――――――――――――――――― FFmpeg ――――――――――――――――――――――――――――――――――――――――

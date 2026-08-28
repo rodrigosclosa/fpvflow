@@ -237,9 +237,14 @@ deploy *param:
     cp -f "$QT_DIR/lib/libQt6EglFSDeviceIntegration.so.6"          "$TARGET/lib/"
     cp -f "$QT_DIR/lib/libQt6EglFsKmsSupport.so.6"                 "$TARGET/lib/"
     cp -f "$QT_DIR/lib/libQt6WlShellIntegration.so.6"              "$TARGET/lib/"
-    cp -f "$QT_DIR/lib/libicudata.so.56"                           "$TARGET/lib/"
-    cp -f "$QT_DIR/lib/libicuuc.so.56"                             "$TARGET/lib/"
-    cp -f "$QT_DIR/lib/libicui18n.so.56"                           "$TARGET/lib/"
+    # Optional: Qt only ships these when it was built against ICU, and 6.7.3 for
+    # Linux is not - the hardcoded .56 made packaging fail after a successful
+    # compile. Copy whatever version is there, if any.
+    # The `|| true` matters: this recipe runs under `set -e`, and a glob that
+    # matches nothing would otherwise fail the whole deploy on the last iteration.
+    for icu in "$QT_DIR"/lib/libicudata.so.* "$QT_DIR"/lib/libicuuc.so.* "$QT_DIR"/lib/libicui18n.so.*; do
+        if [ -f "$icu" ]; then cp -f "$icu" "$TARGET/lib/"; fi
+    done || true
 
     mkdir -p "$TARGET/qml/Qt/labs/folderlistmodel/"
     mkdir -p "$TARGET/qml/QtCore/"
