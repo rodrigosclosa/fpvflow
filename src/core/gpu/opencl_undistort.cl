@@ -579,7 +579,50 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 // Adapted from OpenCV: initUndistortRectifyMap + remap
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
-__kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstptr, __global const void *params_buf, __global const float *matrices, __global const uchar *drawing, __global const float *mesh_data) {
+// Applies the color LUT with trilinear interpolation, done by hand.
+//
+// The table arrives as a plain float buffer, not an image3d_t: 3D image support
+// is optional in OpenCL, and every other input to this kernel is already a
+// __global pointer. Interpolation would have to be explicit regardless - the
+// wgpu path has no sampler either - so nothing is lost by indexing arithmetic.
+//
+// Layout is RGBA, red varying fastest, matching Lut::to_rgba_f32 and the volume
+// layout in core/color/lut/gpu.rs.
+float4 apply_color_lut(float4 pixel, __global const float *lut, int n, __global KernelParams *params) {
+    float last = (float)(n - 1);
+
+    float3 rgb = clamp((float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value, 0.0f, 1.0f);
+    float3 pos = rgb * last;
+    int3 i0 = clamp(convert_int3(floor(pos)),               (int3)(0), (int3)(n - 1));
+    int3 i1 = clamp(convert_int3(floor(pos)) + (int3)(1),   (int3)(0), (int3)(n - 1));
+    float3 f = pos - floor(pos);
+
+#   define LUT_AT(rr, gg, bb) vload4(0, &lut[((rr) + (gg) * n + (bb) * n * n) * 4]).xyz
+
+    float3 c000 = LUT_AT(i0.x, i0.y, i0.z);
+    float3 c100 = LUT_AT(i1.x, i0.y, i0.z);
+    float3 c010 = LUT_AT(i0.x, i1.y, i0.z);
+    float3 c110 = LUT_AT(i1.x, i1.y, i0.z);
+    float3 c001 = LUT_AT(i0.x, i0.y, i1.z);
+    float3 c101 = LUT_AT(i1.x, i0.y, i1.z);
+    float3 c011 = LUT_AT(i0.x, i1.y, i1.z);
+    float3 c111 = LUT_AT(i1.x, i1.y, i1.z);
+
+#   undef LUT_AT
+
+    float3 c00 = mix(c000, c100, f.x);
+    float3 c10 = mix(c010, c110, f.x);
+    float3 c01 = mix(c001, c101, f.x);
+    float3 c11 = mix(c011, c111, f.x);
+
+    float3 c0 = mix(c00, c10, f.y);
+    float3 c1 = mix(c01, c11, f.y);
+    float3 outv = mix(c0, c1, f.z) * params->max_pixel_value;
+
+    return (float4)(outv.x, outv.y, outv.z, pixel.w);
+}
+
+__kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstptr, __global const void *params_buf, __global const float *matrices, __global const uchar *drawing, __global const float *mesh_data, __global const float *lut) {
     int buf_x = get_global_id(0);
     int buf_y = get_global_id(1);
 
@@ -640,15 +683,21 @@ __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstp
 
                 DATA_TYPEF c1 = sample_input_at(uv,  jac, srcptr, params, drawing, bg);
                 DATA_TYPEF c2 = sample_input_at(pt2, jac, srcptr, params, drawing, bg); // FIXME: jac should be adjusted for pt2
-                final_pix = DATA_CONVERT(c1 * alpha + c2 * (1.0f - alpha));
+                // The LUT runs on the float value, before quantization and before
+                // the overlays, so drawing and the safe area keep their own
+                // colors. This branch returns early - forgetting it would leave
+                // part of the frame ungraded.
+                final_pix = DATA_CONVERT(apply_color_lut(c1 * alpha + c2 * (1.0f - alpha), lut, LUT_SIZE, params));
                 draw_pixel(&final_pix, x, y, false, max(params->width, params->output_width), params, drawing);
                 draw_safe_area(&final_pix, x, y, params);
                 *out_pix = final_pix;
                 return;
             }
 
-            final_pix = DATA_CONVERT(sample_input_at(uv, jac, srcptr, params, drawing, bg));
+            final_pix = DATA_CONVERT(apply_color_lut(sample_input_at(uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params));
         } else {
+            // Background, not image data - the user picked this color, so it is
+            // deliberately left ungraded, like the two early returns above.
             final_pix = DATA_CONVERT(bg);
         }
         draw_pixel(&final_pix, x, y, false, max(params->width, params->output_width), params, drawing);

@@ -23,6 +23,7 @@ pub struct OclWrapper {
     buf_drawing: Buffer<u8>,
     buf_mesh_data: Buffer<f32>,
     buf_matrices: Buffer<f32>,
+    buf_lut: Buffer<f32>,
 }
 
 pub struct CtxWrapper {
@@ -201,6 +202,7 @@ impl OclWrapper {
                        .replace("DATA_TYPEF", ocl_names.2)
                        .replace("DATA_CONVERT", ocl_names.1)
                        .replace("DATA_TYPE", ocl_names.0)
+                       .replace("LUT_SIZE", &format!("{}", crate::color::lut::MAX_LUT_SIZE))
                        .replace("PIXEL_BYTES", &format!("{}", params.bytes_per_pixel))
                        .replace("INTERPOLATION", &format!("{}", params.interpolation));
 
@@ -292,6 +294,16 @@ impl OclWrapper {
             let buf_matrices = Buffer::builder().queue(ocl_queue.clone()).flags(flags).len(max_matrix_count).build()?;
             let buf_mesh_data = Buffer::builder().queue(ocl_queue.clone()).flags(flags).len(crate::gyro_source::splines::MAX_BUFFER_SIZE).build()?;
 
+            // The color LUT, as a plain float buffer rather than an image3d_t.
+            // OpenCL only guarantees 3D image support when the device reports it,
+            // and this kernel already reads every other input through __global
+            // pointers, so a buffer avoids the capability question entirely - the
+            // trilinear interpolation is done by hand either way, exactly as on
+            // wgpu, since no sampler is involved there either.
+            let lut_identity = crate::color::lut::LutTexture::identity_at_max(crate::color::lut::LutLayout::Volume3D);
+            let buf_lut = Buffer::builder().queue(ocl_queue.clone()).flags(flags).len(lut_identity.data.len()).build()?;
+            buf_lut.write(&lut_identity.data).enq()?;
+
             let mut builder = Kernel::builder();
             unsafe {
                 builder.program(&program).name("undistort_image").queue(ocl_queue.clone())
@@ -302,7 +314,8 @@ impl OclWrapper {
                     .arg(&buf_params)
                     .arg(&buf_matrices)
                     .arg(&buf_drawing)
-                    .arg(&buf_mesh_data);
+                    .arg(&buf_mesh_data)
+                    .arg(&buf_lut);
             }
 
             let kernel = builder.build()?;
@@ -321,10 +334,35 @@ impl OclWrapper {
                 buf_drawing,
                 buf_matrices,
                 buf_mesh_data,
+                buf_lut,
             })
         } else {
             Err(ocl::BufferCmdError::AlreadyMapped.into())
         }
+    }
+
+    /// Uploads a color LUT, replacing whatever the buffer held.
+    ///
+    /// Mirrors `WgpuWrapper::set_lut`: the payload is resampled to the fixed
+    /// allocation size so the buffer never changes length, and `None` restores
+    /// the identity table, which is what "no LUT loaded" means to the kernel.
+    pub fn set_lut(&mut self, lut: Option<&crate::color::lut::Lut>) -> ocl::Result<bool> {
+        use crate::color::lut::{ LutLayout, LutTexture };
+
+        let payload = match lut {
+            Some(l) => match LutTexture::resampled_to_max(l, LutLayout::Volume3D) {
+                Some(p) => p,
+                None => { log::error!("Only 3D LUTs can go to the GPU, got a 1D table"); return Ok(false); }
+            },
+            None => LutTexture::identity_at_max(LutLayout::Volume3D)
+        };
+
+        if self.buf_lut.len() != payload.data.len() {
+            log::error!("Buffer size mismatch buf_lut! {} vs {}", self.buf_lut.len(), payload.data.len());
+            return Ok(false);
+        }
+        self.buf_lut.write(&payload.data).enq()?;
+        Ok(true)
     }
 
     pub fn undistort_image(&self, buffers: &mut Buffers, itm: &crate::stabilization::FrameTransform, drawing_buffer: &[u8]) -> ocl::Result<()> {

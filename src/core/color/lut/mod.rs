@@ -25,7 +25,7 @@
 pub mod gpu;
 pub mod parser;
 
-pub use gpu::{build_tiled, build_volume, LutLayout, LutTexture};
+pub use gpu::{build_tiled, build_volume, LutLayout, LutTexture, MAX_LUT_SIZE};
 pub use parser::{parse_cube, parse_cube_str, LutParseError};
 
 /// Table payload, either a per-channel curve or a full color cube.

@@ -189,7 +189,16 @@ pub struct Stabilization {
 
     pub share_wgpu_instances: bool,
     pub cache_frame_transform: bool,
-    next_backend: Option<&'static str>
+    next_backend: Option<&'static str>,
+
+    /// The loaded color LUT, or `None` for no grading.
+    ///
+    /// Kept here rather than only inside the backend wrappers because a wrapper
+    /// can be dropped and rebuilt at any time - on a resize, a device change, or
+    /// a cache eviction - and it can also live in the shared thread-local cache
+    /// instead of `self.wgpu`. This is the copy that survives, and it is
+    /// re-applied whenever a backend is initialized.
+    color_lut: Option<std::sync::Arc<crate::color::lut::Lut>>
 }
 
 #[derive(Debug)]
@@ -204,6 +213,50 @@ impl Stabilization {
     pub fn set_compute_params(&mut self, params: ComputeParams) {
         self.stab_data.clear();
         self.compute_params = params;
+    }
+
+    /// Sets the color LUT, or clears it with `None`.
+    ///
+    /// Uploads to whichever backend is live and remembers the table, so it can be
+    /// restored when a backend is rebuilt. It deliberately does **not** invalidate
+    /// `initialized_backend`: the texture is allocated at a fixed size, so
+    /// swapping tables never invalidates a pipeline or a bind group, and forcing
+    /// a rebuild here would stall the preview on every slider move.
+    pub fn set_color_lut(&mut self, lut: Option<std::sync::Arc<crate::color::lut::Lut>>) {
+        self.color_lut = lut;
+
+        if let Some(ref mut wgpu) = self.wgpu {
+            wgpu.set_lut(self.color_lut.as_deref());
+        }
+        if self.share_wgpu_instances {
+            if let BackendType::Wgpu(hash) = self.initialized_backend {
+                CACHED_WGPU.with(|x| {
+                    if let Some(w) = x.0.borrow_mut().get_mut(&hash) { w.set_lut(self.color_lut.as_deref()); }
+                });
+            }
+        }
+
+        #[cfg(feature = "use-opencl")]
+        {
+            let mut apply = |cl: &mut opencl::OclWrapper| {
+                if let Err(e) = cl.set_lut(self.color_lut.as_deref()) {
+                    log::error!("Failed to upload the color LUT to OpenCL: {e:?}");
+                }
+            };
+            if let Some(ref mut cl) = self.cl { apply(cl); }
+            if self.share_wgpu_instances {
+                if let BackendType::OpenCL(hash) = self.initialized_backend {
+                    CACHED_OPENCL.with(|x| {
+                        if let Some(c) = x.borrow_mut().get_mut(&hash) { apply(c); }
+                    });
+                }
+            }
+        }
+    }
+
+    /// The currently loaded color LUT, if any.
+    pub fn color_lut(&self) -> Option<&crate::color::lut::Lut> {
+        self.color_lut.as_deref()
     }
 
     fn get_rect(desc: &BufferDescription) -> [i32; 4] {
@@ -489,7 +542,14 @@ impl Stabilization {
                         opencl::OclWrapper::new(&params, T::ocl_names(), distortion_model, digital_lens, buffers, canvas_len)
                     });
                     match cl {
-                        Ok(Ok(cl)) => {
+                        Ok(Ok(mut cl)) => {
+                            // Same as the wgpu branch below: a fresh wrapper holds
+                            // an identity LUT, so re-apply the loaded one.
+                            if self.color_lut.is_some() {
+                                if let Err(e) = cl.set_lut(self.color_lut.as_deref()) {
+                                    log::error!("Failed to upload the color LUT to OpenCL: {e:?}");
+                                }
+                            }
                             if self.share_wgpu_instances {
                                 CACHED_OPENCL.with(|x| x.borrow_mut().put(hash, cl));
                             } else {
@@ -532,7 +592,13 @@ impl Stabilization {
                         wgpu::WgpuWrapper::new(&params, T::wgpu_format().unwrap(), distortion_model, digital_lens, buffers, canvas_len)
                     });
                     match wgpu {
-                        Ok(Ok(wgpu)) => {
+                        Ok(Ok(mut wgpu)) => {
+                            // A fresh wrapper starts with an identity LUT, so the
+                            // loaded one has to be re-applied here - this runs on
+                            // every resize, device change and cache miss.
+                            if self.color_lut.is_some() {
+                                wgpu.set_lut(self.color_lut.as_deref());
+                            }
                             if self.share_wgpu_instances {
                                 CACHED_WGPU.with(|x| x.0.borrow_mut().put(hash, wgpu));
                             } else {
