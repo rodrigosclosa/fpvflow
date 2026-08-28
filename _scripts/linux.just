@@ -381,18 +381,21 @@ deploy *param:
     else
         appimage-builder --recipe $PROJECT_DIR/_deployment/linux/AppImageBuilder.yml
     fi
-    chmod +x Gyroflow-${APP_VERSION}-{{ArchName}}.AppImage
+    # The name comes from AppImageBuilder.yml, which says FPVFlow - these were
+    # still Gyroflow after the rename, so the AppImage built and then could not
+    # be found.
+    chmod +x FPVFlow-${APP_VERSION}-{{ArchName}}.AppImage
 
     # Try to fix AppImage permissions
-    ./Gyroflow-${APP_VERSION}-{{ArchName}}.AppImage --appimage-extract
-    rm -f Gyroflow-${APP_VERSION}-{{ArchName}}.AppImage
+    ./FPVFlow-${APP_VERSION}-{{ArchName}}.AppImage --appimage-extract
+    rm -f FPVFlow-${APP_VERSION}-{{ArchName}}.AppImage
     sudo chmod 755 squashfs-root
     find ./squashfs-root -type d -exec sudo chmod 755 {} \;
-    mv squashfs-root Gyroflow.AppDir
-    ARCH={{Arch}} appimagetool ./Gyroflow.AppDir
-    rm -rf Gyroflow.AppDir
+    mv squashfs-root FPVFlow.AppDir
+    ARCH={{Arch}} appimagetool ./FPVFlow.AppDir
+    rm -rf FPVFlow.AppDir
 
-    mv Gyroflow-{{ArchName}}.AppImage Gyroflow-{{PackageSuffix}}.AppImage
+    mv FPVFlow-{{ArchName}}.AppImage FPVFlow-{{PackageSuffix}}.AppImage
     # ---- Build AppImage ----
 
     rm -rf $APP_DIR
