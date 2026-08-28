@@ -93,6 +93,7 @@ Rectangle {
     property alias outputFile: outputFile;
     property alias sync: sync.item;
     property alias stab: stab.item;
+    property alias colorLut: colorLut.item;
     property alias exportSettings: exportSettings.item;
     property alias advanced: advanced.item;
     property alias renderBtn: renderBtn;
@@ -514,6 +515,8 @@ Rectangle {
             Hr { id: syncHr; }
             ItemLoader { id: stab; sourceComponent: Component { Menu.Stabilization { } } }
             Hr { id: stabHr; }
+            ItemLoader { id: colorLut; sourceComponent: Component { Menu.ColorLut { } } }
+            Hr { id: colorLutHr; }
             ItemLoader { id: exportSettings; sourceComponent: Component { Menu.Export { showBtn: !window.isMobileLayout; } } }
             Hr { id: exportHr; visible: !isMobileLayout; }
             ItemLoader { id: advanced; sourceComponent: Component { Menu.Advanced { } } }
@@ -767,6 +770,7 @@ Rectangle {
             // Projects without this key still load fine. The ItemLoader is async, so
             // the item can still be null at startup.
             "audio_sync": externalAudio.item? externalAudio.item.getSettings() : ({ }),
+            "color_lut": colorLut.item? colorLut.item.getSettings() : ({ }),
 
             "muted": window.videoArea.vid.muted,
             "playback_speed": window.videoArea.vid.playbackRate

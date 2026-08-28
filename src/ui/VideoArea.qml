@@ -145,6 +145,7 @@ Item {
                 // After sync: external audio needs the video loaded already to place
                 // the waveform on the timeline.
                 if (window.externalAudio) window.externalAudio.loadGyroflow(obj);
+                if (window.colorLut) window.colorLut.loadGyroflow(obj);
                 window.lensProfile.loadGyroflow(obj);
                 Qt.callLater(window.exportSettings.loadGyroflow, obj);
 

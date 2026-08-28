@@ -17,6 +17,7 @@ qrc!(pub rsrc_qml,
         "src/ui/Util.js",
 
         "src/ui/menu/Advanced.qml",
+        "src/ui/menu/ColorLut.qml",
         "src/ui/menu/Export.qml",
         "src/ui/menu/ExternalAudio.qml",
         "src/ui/menu/LensProfile.qml",

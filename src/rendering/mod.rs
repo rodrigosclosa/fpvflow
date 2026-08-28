@@ -625,6 +625,14 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             };
         }
 
+        // Decided per frame, not once: `planes` is built only on the first frame,
+        // but the dispatch below runs every time and has to agree with it. Both
+        // read this same flag so they cannot drift apart.
+        let needs_rgb_for_lut = {
+            let has_lut = stab.stabilization.read().color_lut().is_some();
+            has_lut && !matches!(input_frame.format(), Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE)
+        };
+
         if planes.is_empty() {
             // Good reference about video formats: https://source.chromium.org/chromium/chromium/src/+/master:media/base/video_frame.cc
             // https://gist.github.com/Jim-Bar/3cbba684a71d1a9d468a6711a6eddbeb
@@ -638,6 +646,21 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                 log::debug!("HW frame ({:?}) underlying format: {:?}", format, underlying_format);
                 format = underlying_format;
             }
+
+            // A 3D LUT maps a whole (r,g,b) triplet, but the kernel runs once per
+            // image plane: on 4:2:0 the Y plane is processed alone and the chroma
+            // planes are half resolution, so no shader ever sees the three
+            // channels of one pixel. Routing the frame through an RGB
+            // intermediate is what makes the LUT correct. It costs two sws passes
+            // per frame, so it only happens when a LUT is actually loaded.
+            //
+            // RGBA64BE because it is the only high-precision RGB format already
+            // handled here, which keeps 10 and 12 bit sources from being
+            // flattened to 8.
+            if needs_rgb_for_lut {
+                log::info!("Color LUT active: routing {format:?} through RGBA64BE so the LUT sees full RGB");
+                create_planes_proc!(planes, (RGBA16, input_frame, output_frame, 0, [], 65535.0), );
+            } else {
             match format {
                 Pixel::NV12 => {
                     create_planes_proc!(planes,
@@ -727,6 +750,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     })?;
                 }
             }
+            }
         }
         if planes.is_empty() {
             return Err(FFmpegError::UnknownPixelFormat(input_frame.format()));
@@ -738,6 +762,15 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             }
             progress2((process_frame as f64 / render_frame_count as f64, process_frame, render_frame_count, false, false));
         };
+
+        if needs_rgb_for_lut {
+            // Must match the plane set built above for this same flag.
+            converter.convert_pixel_format(input_frame, output_frame, Pixel::RGBA64BE, ffmpeg_interpolation, |converted_frame, converted_output| {
+                undistort_frame(converted_frame, converted_output);
+            })?;
+            process_frame += 1;
+            return Ok(());
+        }
 
         match input_frame.format() {
             Pixel::VIDEOTOOLBOX | // Pixel::D3D11 |

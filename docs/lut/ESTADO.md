@@ -127,14 +127,48 @@ enxerga constante de Rust; há um `const _: () = assert!(...)` em
 a alternativa é pior: `controller.rs:1112` retorna `true` sem cair para outro
 backend, então uma falha silenciosa daria prévia em branco em vez de log.
 
+## Fase 3 — UI e o bloqueador YUV
+
+**Painel `src/ui/menu/ColorLut.qml`**, entre Estabilização e Exportação. Carrega
+`.cube`, mostra tamanho/título, o caminho, e o **erro de parse** quando o arquivo
+não serve — a mensagem nomeia a linha, que é o que torna um download truncado
+reconhecível.
+
+Registrado nos **5** pontos obrigatórios: `resources_qml.rs`, `menu/qmldir`,
+`App.qml` (ItemLoader + alias), `App.qml:getAdditionalProjectData` e
+`VideoArea.qml` (dispatch de `loadGyroflow`). O projeto guarda a **URL interna**,
+não o caminho legível — no Android os dois não são intercambiáveis.
+
+Controller: `load_color_lut`, `load_color_lut_url`, `clear_color_lut`,
+`get_color_lut_url/_path/_info` e o sinal `color_lut_changed(ok, error)`. O
+`get_color_lut_info` devolve **JSON**, não frase pronta, como o
+`get_external_audio_info` — a tradução vive no QML, onde o `qsTr` alcança.
+
+### O bloqueador YUV, resolvido — e menor do que eu pensava
+
+**A prévia nunca teve o problema.** Ela decodifica para **`RGBA8`**
+(`controller.rs:1068`), então sempre viu RGB completo. O bloqueador valia só para
+a **exportação**.
+
+No `rendering/mod.rs`, quando há LUT carregado e o formato ainda não é RGB, o
+frame passa por **`RGBA64BE`** — o único RGB de alta precisão já tratado ali, o
+que evita achatar material 10/12 bit para 8. Custa duas passagens de `sws` por
+frame, e **só acontece com LUT carregado**.
+
+Detalhe que quase virou bug: `planes` é montado **uma vez** (guardado por
+`planes.is_empty()`), enquanto o dispatch de formato roda **a cada frame**. Os
+dois precisam concordar, então leem a mesma flag `needs_rgb_for_lut` em vez de
+recalcular a condição.
+
 ## Próximo passo
 
-**Fase 3 — ligar `set_color_lut` a uma UI.** O núcleo está pronto nos quatro
-caminhos; nada disso é alcançável pelo usuário ainda.
+**Fase 4 — biblioteca de LUTs** (pasta global nas settings) e o **slider de
+intensidade**, que a especificação pede e ainda não existe: hoje o LUT é aplicado
+a 100%.
 
-E o **bloqueador YUV continua de pé**: em material 4:2:0 o shader recebe planos,
-não RGB, então o LUT só terá efeito correto depois da conversão para `RGBA16`
-descrita acima. Hoje o caminho só está certo para formatos que já chegam em RGB.
+Depois, Fases 5–7 (ajustes por-pixel, vignette, tag de cor no export). A **Fase 6
+segue precisando de replanejamento** — nitidez não cabe no ponto de injeção
+atual, conforme o risco 1.
 
 ### Como isto é testado sem GPU
 

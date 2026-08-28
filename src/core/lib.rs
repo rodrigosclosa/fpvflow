@@ -972,6 +972,36 @@ impl StabilizationManager {
     pub fn set_frame_offset          (&self, v: i32)  { self.params.write().frame_offset           = v; }
     pub fn set_light_refraction_coefficient(&self, v: f64) { self.params.write().light_refraction_coefficient = v; self.invalidate_zooming(); }
     pub fn set_background_color      (&self, bg: Vector4<f32>) { self.params.write().background = bg; }
+
+    /// Loads a `.cube` file and applies it to every backend.
+    ///
+    /// Returns the parse error rather than logging it: a bad LUT is something the
+    /// user chose and needs to see, unlike an internal failure.
+    /// `url` is a filesystem URL, not a plain path - the project reads through
+    /// its own layer so Android content:// URIs work the same as local files.
+    pub fn load_color_lut(&self, url: &str) -> Result<(), color::lut::LutParseError> {
+        let lut = color::lut::parse_cube(url)?;
+        self.stabilization.write().set_color_lut(Some(std::sync::Arc::new(lut)));
+        Ok(())
+    }
+
+    /// Removes the loaded LUT, restoring the identity table.
+    pub fn clear_color_lut(&self) { self.stabilization.write().set_color_lut(None); }
+
+    /// Path of the loaded LUT, or an empty string.
+    pub fn color_lut_path(&self) -> String {
+        self.stabilization.read().color_lut().map(|l| l.path.clone()).unwrap_or_default()
+    }
+
+    /// `TITLE` of the loaded LUT, when the file declares one.
+    pub fn color_lut_title(&self) -> Option<String> {
+        self.stabilization.read().color_lut().and_then(|l| l.title.clone())
+    }
+
+    /// Cube edge of the loaded LUT, or 0 when none is loaded.
+    pub fn color_lut_size(&self) -> usize {
+        self.stabilization.read().color_lut().map(|l| l.size()).unwrap_or(0)
+    }
     pub fn set_background_mode       (&self, v: i32)  { self.params.write().background_mode = stabilization_params::BackgroundMode::from(v); }
     pub fn set_background_margin     (&self, v: f64)  { self.params.write().background_margin = v; }
     pub fn set_background_margin_feather(&self, v: f64) { self.params.write().background_margin_feather = v; }
