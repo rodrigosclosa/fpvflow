@@ -3,7 +3,7 @@
 
 use argh::FromArgs;
 use cpp::*;
-use gyroflow_core::*;
+use fpvflow_core::*;
 use std::sync::Arc;
 use std::time::Instant;
 use qmetaobject::QString;
@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::rendering;
 use crate::rendering::render_queue::*;
 use indicatif::{ProgressBar, MultiProgress, ProgressState, ProgressStyle};
-use gyroflow_core::filesystem::path_to_url;
+use fpvflow_core::filesystem::path_to_url;
 
 cpp! {{
     struct TraitObject2 { void *data; void *vtable; };
@@ -223,7 +223,7 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
         let mut queue = RenderQueue::new(stab.clone());
 
         rendering::init_log();
-        if let Some((name, _list_name)) = gyroflow_core::gpu::initialize_contexts() {
+        if let Some((name, _list_name)) = fpvflow_core::gpu::initialize_contexts() {
             rendering::set_gpu_type_from_name(&name);
         }
         let mut additional_data = setup_defaults(&stab, &mut queue);
@@ -243,16 +243,16 @@ pub fn run(open_file: &mut String, open_preset: &mut String) -> bool {
 
         if let Some(mut outp) = opts.out_params {
             outp = outp.replace('\'', "\"");
-            gyroflow_core::util::merge_json(additional_data.get_mut("output").unwrap(), &serde_json::from_str(&outp).expect("Invalid json"));
+            fpvflow_core::util::merge_json(additional_data.get_mut("output").unwrap(), &serde_json::from_str(&outp).expect("Invalid json"));
         }
         if let Some(mut x) = opts.sync_params {
             x = x.replace('\'', "\"");
-            gyroflow_core::util::merge_json(additional_data.get_mut("synchronization").unwrap(), &serde_json::from_str(&x).expect("Invalid json"));
+            fpvflow_core::util::merge_json(additional_data.get_mut("synchronization").unwrap(), &serde_json::from_str(&x).expect("Invalid json"));
         } else if let Some(preset) = presets.first() {
             let content = if preset.starts_with('{') { preset.clone() } else { std::fs::read_to_string(preset).expect("Reading preset file") };
             if let Ok(parsed_preset) = serde_json::from_str::<serde_json::Value>(&content) {
                 if let Some(sync) = parsed_preset.get("synchronization") {
-                    gyroflow_core::util::merge_json(additional_data.get_mut("synchronization").unwrap(), sync);
+                    fpvflow_core::util::merge_json(additional_data.get_mut("synchronization").unwrap(), sync);
                 }
             }
         }
@@ -550,7 +550,7 @@ fn detect_types(all_files: &[String]) -> (Vec<String>, Vec<String>, Vec<String>)
 }
 
 fn setup_defaults(stab: &Arc<StabilizationManager>, queue: &mut RenderQueue) -> serde_json::Value {
-    use gyroflow_core::settings;
+    use fpvflow_core::settings;
     let codecs = [
         "H.264/AVC",
         "H.265/HEVC",
@@ -574,7 +574,7 @@ fn setup_defaults(stab: &Arc<StabilizationManager>, queue: &mut RenderQueue) -> 
     let smoothing_method = settings::get_u64("smoothingMethod", 1) as usize;
     let smoothing_method_prefix = format!("smoothing-{}-", smoothing_method);
     stab.set_smoothing_method(smoothing_method);
-    for (k, v) in gyroflow_core::settings::get_all() {
+    for (k, v) in fpvflow_core::settings::get_all() {
         if k.starts_with(&smoothing_method_prefix) {
             if let Some(v) = v.as_f64() {
                 stab.set_smoothing_param(k.strip_prefix(&smoothing_method_prefix).unwrap(), v);

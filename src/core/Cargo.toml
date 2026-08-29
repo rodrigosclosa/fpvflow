@@ -1,12 +1,12 @@
 [package]
-name = "gyroflow-core"
+name = "fpvflow-core"
 version = "1.6.3"
 authors = ["Adrian <adrian.eddy@gmail.com>", "Elvin Chen"]
 edition = "2024"
 build = "build.rs"
 
 [lib]
-name = "gyroflow_core"
+name = "fpvflow_core"
 path = "lib.rs"
 
 [dependencies]
@@ -78,7 +78,7 @@ ocl = { version = "0.19.7", optional = true }
 ocl-interop = { version = "0.1.6", optional = true }
 rustfft = "6.4.1"
 # External audio decoding (`audio` module). Used instead of ffmpeg because
-# gyroflow-core does not depend on ffmpeg and should not start to. The features cover
+# fpvflow-core does not depend on ffmpeg and should not start to. The features cover
 # WAV/PCM including IEEE 32-bit float (format tag 3), which is what the DJI Mic records.
 symphonia = { version = "0.5.5", default-features = false, features = ["wav", "pcm", "aac", "isomp4", "mp3", "flac"] }
 exr = "1.74"

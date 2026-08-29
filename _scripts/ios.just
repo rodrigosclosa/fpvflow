@@ -113,7 +113,7 @@ build-and-package profile is_dist:
     set -e
 
     rm -rf {{ProjectDir}}/_deployment/_binaries/ios/
-    rm -f {{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/gyroflow
+    rm -f {{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/fpvflow
 
     mkdir -p {{AppBundle}}
 
@@ -141,8 +141,8 @@ build-and-package profile is_dist:
         fi
     fi
 
-    if [ -f "{{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/gyroflow" ]; then
-        cp -f {{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/gyroflow {{AppBundle}}/gyroflow
+    if [ -f "{{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/fpvflow" ]; then
+        cp -f {{ProjectDir}}/target/aarch64-apple-ios/{{profile}}/fpvflow {{AppBundle}}/fpvflow
         cp -rf {{ProjectDir}}/target/aarch64-apple-ios/Frameworks {{AppBundle}}/Frameworks
         cp -rf {{ProjectDir}}/_deployment/ios/Info.plist {{AppBundle}}/Info.plist
         cp -rf {{ProjectDir}}/_deployment/ios/PrivacyInfo.xcprivacy {{AppBundle}}/PrivacyInfo.xcprivacy
@@ -220,12 +220,12 @@ build-and-package profile is_dist:
 
         actool {{ProjectDir}}/_deployment/ios/Resources/Images.xcassets --compile {{AppBundle}} --platform iphoneos --minimum-deployment-target 15 --app-icon AppIcon --output-partial-info-plist {{AppBundle}}/../../AppIcon.plist
 
-        ibtool --errors --warnings --notices --module gyroflow --target-device iphone --target-device ipad --minimum-deployment-target 14.0 --output-format human-readable-text --auto-activate-custom-fonts --compilation-directory {{AppBundle}}/../../ {{ProjectDir}}/_deployment/ios/LaunchScreen.storyboard
-        ibtool --errors --warnings --notices --module gyroflow --target-device iphone --target-device ipad --minimum-deployment-target 14.0 --output-format human-readable-text --link {{AppBundle}} {{AppBundle}}/../../LaunchScreen.storyboardc
+        ibtool --errors --warnings --notices --module fpvflow --target-device iphone --target-device ipad --minimum-deployment-target 14.0 --output-format human-readable-text --auto-activate-custom-fonts --compilation-directory {{AppBundle}}/../../ {{ProjectDir}}/_deployment/ios/LaunchScreen.storyboard
+        ibtool --errors --warnings --notices --module fpvflow --target-device iphone --target-device ipad --minimum-deployment-target 14.0 --output-format human-readable-text --link {{AppBundle}} {{AppBundle}}/../../LaunchScreen.storyboardc
 
         cp -f "$PROVISIONING_PROFILE" {{AppBundle}}/embedded.mobileprovision
         #derq query -f xml -i {{ProjectDir}}/_deployment/ios/Entitlements.plist -o {{AppBundle}}/../../Gyroflow.app.xcent.der --raw
-        dsymutil {{AppBundle}}/gyroflow -o {{AppBundle}}/../../../Gyroflow.app.dSYM
+        dsymutil {{AppBundle}}/fpvflow -o {{AppBundle}}/../../../Gyroflow.app.dSYM
         mkdir -p {{AppBundle}}/../../Symbols
         xcrun symbols -noTextInSOD -noDaemon -arch all -symbolsPackageDir {{AppBundle}}/../../Symbols {{AppBundle}}/../../../Gyroflow.app.dSYM
         rm -rf {{AppBundle}}/../../../Gyroflow.app.dSYM

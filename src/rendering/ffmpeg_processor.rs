@@ -8,7 +8,7 @@ use std::error;
 
 use ffmpeg_next::{ ffi, codec, encoder, format, frame, media, Dictionary, Rational, Stream, rescale, rescale::Rescale };
 
-use gyroflow_core::filesystem::{ self, FilesystemError, FfmpegPathWrapper };
+use fpvflow_core::filesystem::{ self, FilesystemError, FfmpegPathWrapper };
 use super::*;
 use super::ffmpeg_video::*;
 use super::ffmpeg_audio::*;
@@ -36,10 +36,10 @@ pub struct FfmpegProcessor<'a> {
     /// External audio track to mux into the output file, replacing the clip's embedded audio.
     ///
     /// The buffer is already offset-aligned and cut to the project's trim ranges by
-    /// `gyroflow_core::audio::export::build_from_trim_ranges`. The `codec::Id` comes along
+    /// `fpvflow_core::audio::export::build_from_trim_ranges`. The `codec::Id` comes along
     /// because it is decided by the source format (to preserve it losslessly), not by the
     /// UI codec selector.
-    pub external_audio: Option<(gyroflow_core::audio::AudioTrack, Vec<f32>, codec::Id)>,
+    pub external_audio: Option<(fpvflow_core::audio::AudioTrack, Vec<f32>, codec::Id)>,
 
     input_context: format::context::Input,
 

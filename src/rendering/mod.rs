@@ -14,7 +14,7 @@ pub mod render_queue;
 pub mod mdk_processor;
 pub mod video_processor;
 pub mod zero_copy;
-use gyroflow_core::settings;
+use fpvflow_core::settings;
 use zero_copy::*;
 #[cfg(target_os = "android")]
 pub mod ffmpeg_android;
@@ -31,7 +31,7 @@ use std::os::raw::c_int;
 use std::rc::Rc;
 use std::sync::{ Arc, atomic::AtomicBool };
 use parking_lot::RwLock;
-use gyroflow_core::gpu::Buffers;
+use fpvflow_core::gpu::Buffers;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum GpuType {
@@ -73,7 +73,7 @@ pub fn set_gpu_type_from_name(name: &str) {
         #[cfg(target_os = "macos")]
         if !name.contains("apple m") {
             // Disable GPU decoding on Intel macOS by default
-            gyroflow_core::settings::set("gpudecode", false.into());
+            fpvflow_core::settings::set("gpudecode", false.into());
         }
         ffmpeg_hw::initialize_ctx(ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX);
     }
@@ -187,7 +187,7 @@ pub fn get_possible_encoders(codec: &str, use_gpu: bool) -> Vec<(&'static str, b
     encoders
 }
 
-pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &gyroflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2) -> Result<(), FFmpegError>
+pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &fpvflow_core::InputFile, render_options: &RenderOptions, gpu_decoder_index: i32, trim_range_ind: Option<usize>, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>, encoder_initialized: F2) -> Result<(), FFmpegError>
     where F: Fn((f64, usize, usize, bool, bool)) + Send + Sync + Clone,
           F2: Fn(String) + Send + Sync + Clone
 {
@@ -431,7 +431,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     // External audio. The `audio` flag above is the master switch; when it's on and an
     // external track is set, that track replaces the clip's embedded audio.
     if render_options.audio && !render_options.external_audio_url.is_empty() {
-        match gyroflow_core::audio::decode::decode_file(&render_options.external_audio_url) {
+        match fpvflow_core::audio::decode::decode_file(&render_options.external_audio_url) {
             Ok(mut track) => {
                 track.offset_seconds = render_options.external_audio_offset;
                 track.preserve_original_format = render_options.external_audio_preserve_format;
@@ -443,13 +443,13 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
 
-                let compat = gyroflow_core::audio::export::check_format_compatibility(
+                let compat = fpvflow_core::audio::export::check_format_compatibility(
                     track.source_format,
                     extension,
                     track.preserve_original_format,
                 );
 
-                use gyroflow_core::audio::export::FormatCompatibility;
+                use fpvflow_core::audio::export::FormatCompatibility;
                 let codec_name = match &compat {
                     FormatCompatibility::Preserved { codec } => *codec,
                     FormatCompatibility::DowngradeAccepted { codec } => *codec,
@@ -478,7 +478,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                     (params.trim_ranges.clone(), params.get_scaled_duration_ms() / 1000.0)
                 };
 
-                let samples = gyroflow_core::audio::export::build_from_trim_ranges(
+                let samples = fpvflow_core::audio::export::build_from_trim_ranges(
                     &track,
                     &trim_ranges,
                     video_duration_s,
@@ -524,7 +524,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     let mut ramped_ts = 0.0;
     let mut final_ts = 0;
     let interval = (1_000_000.0 / fps).round() as i64;
-    let is_speed_changed = video_speed != 1.0 || stab.keyframes.read().is_keyframed(&gyroflow_core::keyframes::KeyframeType::VideoSpeed);
+    let is_speed_changed = video_speed != 1.0 || stab.keyframes.read().is_keyframed(&fpvflow_core::keyframes::KeyframeType::VideoSpeed);
     if is_speed_changed {
         proc.audio_codec = codec::Id::None; // Audio not supported when changing speed
     }
@@ -541,7 +541,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         }
 
         if is_speed_changed {
-            let vid_speed = stab.keyframes.read().value_at_video_timestamp(&gyroflow_core::keyframes::KeyframeType::VideoSpeed, timestamp_us as f64 / 1000.0).unwrap_or(video_speed);
+            let vid_speed = stab.keyframes.read().value_at_video_timestamp(&fpvflow_core::keyframes::KeyframeType::VideoSpeed, timestamp_us as f64 / 1000.0).unwrap_or(video_speed);
             let current_interval = ((rate_control.out_timestamp_us - prev_real_ts) as f64) / vid_speed;
             ramped_ts += current_interval;
             prev_real_ts = rate_control.out_timestamp_us;
@@ -819,8 +819,8 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     let mut filename = render_options.output_filename.clone();
     let folder = &render_options.output_folder;
-    if cfg!(not(any(target_os = "android", target_os = "ios"))) && !gyroflow_core::filesystem::exists(folder) {
-        let path = gyroflow_core::filesystem::url_to_path(folder);
+    if cfg!(not(any(target_os = "android", target_os = "ios"))) && !fpvflow_core::filesystem::exists(folder) {
+        let path = fpvflow_core::filesystem::url_to_path(folder);
         if !path.is_empty() {
             let _ = std::fs::create_dir_all(path);
         }
@@ -842,11 +842,11 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
 
     drop(proc);
 
-    let output_url = gyroflow_core::filesystem::get_file_url(folder, &filename, false);
+    let output_url = fpvflow_core::filesystem::get_file_url(folder, &filename, false);
 
     if render_filename != filename {
-        let output_url_temp = gyroflow_core::filesystem::get_file_url(folder, &render_filename, false);
-        if let Err(e) = std::fs::rename(&gyroflow_core::filesystem::url_to_path(&output_url_temp), &gyroflow_core::filesystem::url_to_path(&output_url)) {
+        let output_url_temp = fpvflow_core::filesystem::get_file_url(folder, &render_filename, false);
+        if let Err(e) = std::fs::rename(&fpvflow_core::filesystem::url_to_path(&output_url_temp), &fpvflow_core::filesystem::url_to_path(&output_url)) {
             ::log::error!("Failed to rename file from {output_url_temp} to {output_url}: {e:?}");
         }
     }
@@ -854,7 +854,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     let re = regex::Regex::new(r#"%[0-9]+d"#).unwrap();
     if re.is_match(&filename) {
         ::log::debug!("Removing {output_url}");
-        let _ = gyroflow_core::filesystem::remove_file(&output_url);
+        let _ = fpvflow_core::filesystem::remove_file(&output_url);
     }
     if trim_range_ind.is_none() || trim_range_ind == Some(org_trim_ranges.len() - 1) {
         progress((1.0, render_frame_count, render_frame_count, true, false));

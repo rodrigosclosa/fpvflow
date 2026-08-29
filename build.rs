@@ -109,7 +109,7 @@ fn main() {
     // end). Without it, editing a cpp! body leaves the generated library holding
     // the old closure hashes and the build fails with "not found in the
     // library's rust-cpp metadata".
-    println!("cargo:rerun-if-changed=src/gyroflow.rs");
+    println!("cargo:rerun-if-changed=src/fpvflow.rs");
 
     if target_os == "ios" {
         println!("cargo:rerun-if-changed=_deployment/ios/qml_plugins.cpp");
@@ -271,7 +271,7 @@ fn main() {
 
     config
         .include(&qt_include_path)
-        .build("src/gyroflow.rs");
+        .build("src/fpvflow.rs");
 
     if target_os == "ios" {
         let out_dir = env::var("OUT_DIR").unwrap();

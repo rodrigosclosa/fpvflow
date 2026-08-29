@@ -9,7 +9,7 @@
 //! modifications.
 
 use ffmpeg_next::codec;
-use gyroflow_core::audio::{AudioTrack, SourceFormat};
+use fpvflow_core::audio::{AudioTrack, SourceFormat};
 
 use super::audio_export::ExternalAudioEncoder;
 

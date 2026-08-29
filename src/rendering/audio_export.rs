@@ -8,7 +8,7 @@
 //! there is no input stream here - the audio comes from another file, already
 //! decoded in memory - so the parameters come from the [`AudioTrack`].
 //!
-//! Samples arrive as `f32` from [`gyroflow_core::audio::export`] and are
+//! Samples arrive as `f32` from [`fpvflow_core::audio::export`] and are
 //! converted only once, to whatever format the encoder asks for. With
 //! `pcm_f32le` and an encoder that accepts `F32` there is no conversion at all,
 //! so the original bits reach the output intact.
@@ -17,7 +17,7 @@ use ffmpeg_next::{ codec, encoder, format, frame, Error, Rational };
 use ffmpeg_next::channel_layout::ChannelLayout;
 use ffmpeg_next::format::context::Output;
 
-use gyroflow_core::audio::AudioTrack;
+use fpvflow_core::audio::AudioTrack;
 
 use super::audio_resampler::AudioResampler;
 
@@ -40,7 +40,7 @@ impl ExternalAudioEncoder {
     /// Creates the output stream and configures the encoder from the track.
     ///
     /// `codec_id` must come from
-    /// [`gyroflow_core::audio::export::recommended_codec`], already validated
+    /// [`fpvflow_core::audio::export::recommended_codec`], already validated
     /// against the container - getting here with a codec the container does not
     /// accept would produce an unreadable file.
     pub fn new(codec_id: codec::Id, track: &AudioTrack, octx: &mut Output, ost_index: usize) -> Result<Self, Error> {
@@ -126,7 +126,7 @@ impl ExternalAudioEncoder {
     /// Encodes the whole buffer and writes the packets to the output file.
     ///
     /// `samples` are interleaved `f32` samples, already trimmed and aligned by
-    /// [`gyroflow_core::audio::export::build_segment`].
+    /// [`fpvflow_core::audio::export::build_segment`].
     pub fn write_all(&mut self, samples: &[f32], octx: &mut Output, ost_time_base: Rational) -> Result<(), Error> {
         let channels = self.channels as usize;
         if channels == 0 || samples.is_empty() {

@@ -13,7 +13,7 @@
 //! The audio is reduced to (min, max) pairs per pixel column, so the amount of
 //! data reaching the painting code doesn't depend on the track duration.
 
-use gyroflow_core::audio::AudioTrack;
+use fpvflow_core::audio::AudioTrack;
 use qmetaobject::*;
 
 use crate::util;

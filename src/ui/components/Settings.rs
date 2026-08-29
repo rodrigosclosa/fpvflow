@@ -24,25 +24,25 @@ pub struct Settings {
 impl Settings {
     fn value(&self, key: QString, default: QVariant) -> QVariant {
         let key = key.to_string();
-        serde_json_to_qvariant(gyroflow_core::settings::get(&key, qvariant_to_serde_json(default)))
+        serde_json_to_qvariant(fpvflow_core::settings::get(&key, qvariant_to_serde_json(default)))
     }
     fn contains(&self, key: QString) -> bool {
         let key = key.to_string();
-        gyroflow_core::settings::contains(&key)
+        fpvflow_core::settings::contains(&key)
     }
     fn setValue(&self, key: QString, val: QVariant) {
         let key = key.to_string();
-        gyroflow_core::settings::set(&key, qvariant_to_serde_json(val))
+        fpvflow_core::settings::set(&key, qvariant_to_serde_json(val))
     }
     fn clear(&self) {
-        gyroflow_core::settings::clear()
+        fpvflow_core::settings::clear()
     }
     fn flush(&self) {
-        gyroflow_core::settings::flush()
+        fpvflow_core::settings::flush()
     }
     fn dataDir(&self, path: QString) -> QString {
         let path = path.to_string();
-        QString::from(gyroflow_core::settings::data_dir().join(path).to_string_lossy().to_string())
+        QString::from(fpvflow_core::settings::data_dir().join(path).to_string_lossy().to_string())
     }
     ///////////////////////////////////////////////////////////////////
 

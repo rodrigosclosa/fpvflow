@@ -101,7 +101,7 @@ impl REDSdk {
     pub fn convert_r3d<F: FnMut((f64, String, String))>(url: &str, format: i32, force_primary: bool, gamma: i32, space: i32, additional_params: &str, mut progress: F, cancel_flag: Arc<AtomicBool>) {
         let redline = Self::find_redline();
         if !redline.is_empty() {
-            let p = std::path::Path::new(&gyroflow_core::filesystem::url_to_path(url)).to_owned();
+            let p = std::path::Path::new(&fpvflow_core::filesystem::url_to_path(url)).to_owned();
 
             let output_file = p.with_extension("").to_string_lossy().into_owned();
 
@@ -144,7 +144,7 @@ impl REDSdk {
 
                 for line in reader.lines().flatten() {
                     if let Some(m) = re_output_name.captures(&line) {
-                        out_filename = Some(gyroflow_core::filesystem::path_to_url(m.get(1).unwrap().as_str()));
+                        out_filename = Some(fpvflow_core::filesystem::path_to_url(m.get(1).unwrap().as_str()));
                     }
                     if let Some(m) = re_progress.captures(&line) {
                         if let Ok(p) = m.get(1).unwrap().as_str().parse::<f64>() {

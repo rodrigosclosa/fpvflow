@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use gyroflow_core::{ stabilization::ProcessedInfo, gpu::Buffers };
+use fpvflow_core::{ stabilization::ProcessedInfo, gpu::Buffers };
 use qml_video_rs::video_player::MDKPlayerWrapper;
 use std::sync::Arc;
 use crate::core::StabilizationManager;
@@ -16,7 +16,7 @@ cpp! {{
 // LUT_SIZE is spelled out again in qrhi_undistort.cpp, because a cpp! block
 // cannot see Rust constants. If they ever disagree the texture and the payload
 // would differ in size, so pin it here rather than discovering it at runtime.
-const _: () = assert!(gyroflow_core::color::lut::MAX_LUT_SIZE == 65);
+const _: () = assert!(fpvflow_core::color::lut::MAX_LUT_SIZE == 65);
 
 pub fn render(mdkplayer: &MDKPlayerWrapper, timestamp: f64, frame: usize, width: u32, height: u32, stab: Arc<StabilizationManager>, buffers: &mut Buffers) -> Option<ProcessedInfo> {
     if stab.prevent_recompute.load(std::sync::atomic::Ordering::SeqCst) { return None; }

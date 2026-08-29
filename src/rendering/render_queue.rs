@@ -727,11 +727,11 @@ impl RenderQueue {
                 }
             }
         }
-        gyroflow_core::settings::set("renderQueue", serde_json::to_value(&all).unwrap_or_default());
+        fpvflow_core::settings::set("renderQueue", serde_json::to_value(&all).unwrap_or_default());
     }
 
     pub fn restore_render_queue(&mut self, additional_data: String) -> bool {
-        let rq = gyroflow_core::settings::get("renderQueue", Default::default());
+        let rq = fpvflow_core::settings::get("renderQueue", Default::default());
         let rqv = match rq {
             serde_json::Value::String(v) => serde_json::from_str(&v) as serde_json::Result<Vec<serde_json::Value>>,
             serde_json::Value::Array(v) => Ok(v),
@@ -967,7 +967,7 @@ impl RenderQueue {
                         match opt {
                             1 => {
                                 let gyro_url = stab.input_file.read().url.clone();
-                                let contents = gyroflow_core::gyro_export::export_full_metadata(&gyro_url, &stab)?;
+                                let contents = fpvflow_core::gyro_export::export_full_metadata(&gyro_url, &stab)?;
                                 filesystem::write(&url, contents.as_bytes())?;
                             },
                             2 => {
@@ -977,7 +977,7 @@ impl RenderQueue {
                             },
                             3 => {
                                 let filename = filesystem::get_filename(&url).to_ascii_lowercase();
-                                let contents = gyroflow_core::gyro_export::export_gyro_data(&filename, &serde_json::to_string(&fields).unwrap(), &stab);
+                                let contents = fpvflow_core::gyro_export::export_gyro_data(&filename, &serde_json::to_string(&fields).unwrap(), &stab);
                                 filesystem::write(&url, contents.as_bytes())?
                             }
                             _ => { }
@@ -1028,7 +1028,7 @@ impl RenderQueue {
                         2 => stab.export_gyroflow_file(&gf_url, core::GyroflowProjectType::WithGyroData, &additional_data),
                         3 => stab.export_gyroflow_file(&gf_url, core::GyroflowProjectType::WithProcessedData, &additional_data),
                         4 => stab.export_gyroflow_file(&gf_url, core::GyroflowProjectType::WithGyroData, &additional_data),
-                        _ => { Err(gyroflow_core::GyroflowCoreError::Unknown) }
+                        _ => { Err(fpvflow_core::GyroflowCoreError::Unknown) }
                     };
                     if export_project != 4 {
                         if let Err(e) = result {
@@ -1058,14 +1058,14 @@ impl RenderQueue {
                                 frame += 1;
                             }
                         };
-                        let format = gyroflow_core::settings::get_u64("r3dConvertFormat", 0) as i32;
-                        let force_primary = gyroflow_core::settings::get_u64("r3dColorMode", 0) as i32;
+                        let format = fpvflow_core::settings::get_u64("r3dConvertFormat", 0) as i32;
+                        let force_primary = fpvflow_core::settings::get_u64("r3dColorMode", 0) as i32;
 
                         let gamma_curves = [-1, 1, 2, 3, 4, 5, 6, 14, 15, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37];
                         let color_spaces = [2, 0, 1, 14, 15, 5, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27];
-                        let gamma = gamma_curves[gyroflow_core::settings::get_u64("r3dGammaCurve", 7) as usize];
-                        let space = color_spaces[gyroflow_core::settings::get_u64("r3dColorSpace", 0) as usize];
-                        let additional_params = gyroflow_core::settings::get_str("r3dRedlineParams", "");
+                        let gamma = gamma_curves[fpvflow_core::settings::get_u64("r3dGammaCurve", 7) as usize];
+                        let space = color_spaces[fpvflow_core::settings::get_u64("r3dColorSpace", 0) as usize];
+                        let additional_params = fpvflow_core::settings::get_str("r3dRedlineParams", "");
                         crate::external_sdk::r3d::REDSdk::convert_r3d(&in_file, format, force_primary > 0, gamma, space, &additional_params, r3d_progress, cancel_flag.clone());
                         if cancel_flag.load(SeqCst) {
                             std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1224,7 +1224,7 @@ impl RenderQueue {
                             max_zoom_iterations:       params.max_zoom_iterations,
                             ..Default::default()
                         })),
-                        input_file: Arc::new(RwLock::new(gyroflow_core::InputFile { url: if is_gf_data { String::new() } else { url.clone() }, project_file_url: None, image_sequence_start: 0, image_sequence_fps: 0.0, preset_name: None, preset_output_size: None })),
+                        input_file: Arc::new(RwLock::new(fpvflow_core::InputFile { url: if is_gf_data { String::new() } else { url.clone() }, project_file_url: None, image_sequence_start: 0, image_sequence_fps: 0.0, preset_name: None, preset_output_size: None })),
                         lens_profile_db: stabilizer.lens_profile_db.clone(),
                         ..Default::default()
                     };
@@ -1404,8 +1404,8 @@ impl RenderQueue {
                                 Self::update_sync_settings(&stab, &sync_options);
 
                                 // Apply default preset
-                                let default_preset = gyroflow_core::lens_profile_database::LensProfileDatabase::get_path().join("default.gyroflow");
-                                let default_preset2 = gyroflow_core::settings::data_dir().join("lens_profiles").join("default.gyroflow");
+                                let default_preset = fpvflow_core::lens_profile_database::LensProfileDatabase::get_path().join("default.gyroflow");
+                                let default_preset2 = fpvflow_core::settings::data_dir().join("lens_profiles").join("default.gyroflow");
                                 if let Ok(data) = std::fs::read_to_string(default_preset2) {
                                     apply_preset((data, job_id));
                                 } else if let Ok(data) = std::fs::read_to_string(default_preset) {
@@ -1430,7 +1430,7 @@ impl RenderQueue {
         job_id
     }
 
-    fn do_autosync<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &gyroflow_core::InputFile, err: F2, proc_height: i32) {
+    fn do_autosync<F: Fn(f64) + Send + Sync + Clone + 'static, F2: Fn((String, String)) + Send + Sync + Clone + 'static>(stab: Arc<StabilizationManager>, processing_cb: F, input_file: &fpvflow_core::InputFile, err: F2, proc_height: i32) {
         let (url, duration_ms) = {
             (stab.input_file.read().url.clone(), stab.params.read().duration_ms)
         };
@@ -1447,8 +1447,8 @@ impl RenderQueue {
             // ----------------------------------------------------------------------------
             // --------------------------------- Autosync ---------------------------------
             processing_cb(0.01);
-            use gyroflow_core::synchronization::AutosyncProcess;
-            use gyroflow_core::synchronization;
+            use fpvflow_core::synchronization::AutosyncProcess;
+            use fpvflow_core::synchronization;
             use crate::rendering::VideoProcessor;
             use itertools::Either;
 

@@ -167,7 +167,7 @@ deploy *param:
         export OPENCV_INCLUDE_PATHS=$OPENCV_DIR/x64-osx/include/opencv4/
         rustup target add x86_64-apple-darwin
         cargo build --target x86_64-apple-darwin --profile deploy
-        #strip $PROJECT_DIR/target/x86_64-apple-darwin/deploy/gyroflow
+        #strip $PROJECT_DIR/target/x86_64-apple-darwin/deploy/fpvflow
 
         export FFMPEG_DIR=$PROJECT_DIR/ext/ffmpeg-arm64
         export OPENCV_LINK_PATHS=$OPENCV_DIR/arm64-osx/lib
@@ -175,9 +175,9 @@ deploy *param:
         export MACOSX_DEPLOYMENT_TARGET="11.0"
         rustup target add aarch64-apple-darwin
         cargo build --target aarch64-apple-darwin --profile deploy
-        #strip $PROJECT_DIR/target/aarch64-apple-darwin/deploy/gyroflow
+        #strip $PROJECT_DIR/target/aarch64-apple-darwin/deploy/fpvflow
 
-        lipo $PROJECT_DIR/target/{x86_64,aarch64}-apple-darwin/deploy/gyroflow -create -output $PROJECT_DIR/target/deploy/gyroflow
+        lipo $PROJECT_DIR/target/{x86_64,aarch64}-apple-darwin/deploy/fpvflow -create -output $PROJECT_DIR/target/deploy/fpvflow
 
         popd
     fi
@@ -206,7 +206,7 @@ deploy *param:
         # Renamed on copy: cargo produces "gyroflow" (the crate name), but the bundle
         # ships it as FPVFlow to match CFBundleExecutable. The two must agree or
         # macOS cannot find the binary and the app will not launch.
-        cp -f  "$PROJECT_DIR/target/deploy/gyroflow"          "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow"
+        cp -f  "$PROJECT_DIR/target/deploy/fpvflow"          "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow"
         strip "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/MacOS/FPVFlow"
         cp -Rf "$PROJECT_DIR/target/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/" || true
         cp -Rf "$PROJECT_DIR/target/x86_64-apple-darwin/Frameworks/mdk.framework" "$PROJECT_DIR/_deployment/_binaries/mac/FPVFlow.app/Contents/Frameworks/"
@@ -370,7 +370,7 @@ bundle *param:
     export PATH="/usr/libexec/:$PATH"
 
     cp -f "$PROJECT_DIR/_deployment/mac/FPVFlow.app/Contents/Info.plist" {{AppBundle}}/Contents/Info.plist
-    cp -f "$PROJECT_DIR/target/deploy/gyroflow" "{{AppBundle}}/Contents/MacOS/FPVFlow"
+    cp -f "$PROJECT_DIR/target/deploy/fpvflow" "{{AppBundle}}/Contents/MacOS/FPVFlow"
 
     if ! [ -z "$GITHUB_RUN_NUMBER" ]; then
         PlistBuddy -x -c "Set :CFBundleVersion \"`echo "{{ProjectVersion}}" | sed -E 's/[^0-9\.]//' | sed -E 's/\.([0-9]+)$/\1/'`.$GITHUB_RUN_NUMBER\"" {{AppBundle}}/Contents/Info.plist

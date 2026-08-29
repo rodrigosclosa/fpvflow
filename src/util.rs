@@ -251,7 +251,7 @@ pub fn init_logging() {
 
     #[cfg(not(target_os = "android"))]
     {
-        let exe_loc = gyroflow_core::settings::data_dir().join("gyroflow.log");
+        let exe_loc = fpvflow_core::settings::data_dir().join("gyroflow.log");
         if let Ok(file_log) = std::fs::File::create(exe_loc) {
             let _ = CombinedLogger::init(vec![
                 TermLogger::new(LevelFilter::Debug, log_config, TerminalMode::Mixed, ColorChoice::Auto),
@@ -413,7 +413,7 @@ pub fn save_exe_location() {
             if let Some(parent) = exe_path.parent() { // MacOS
                 if let Some(parent) = parent.parent() { // Contents
                     if let Some(parent) = parent.parent() { // Gyroflow.app
-                        gyroflow_core::settings::set("exeLocation", parent.to_string_lossy().into());
+                        fpvflow_core::settings::set("exeLocation", parent.to_string_lossy().into());
                     }
                 }
             }
@@ -442,7 +442,7 @@ pub fn save_exe_location() {
                 }
             }
 
-            gyroflow_core::settings::set("exeLocation", exe_str.into());
+            fpvflow_core::settings::set("exeLocation", exe_str.into());
         }
     }
 }
@@ -475,8 +475,8 @@ pub fn image_to_b64(img: QImage) -> QString {
 
 pub fn update_file_times(output_url: &str, input_url: &str, additional_ms: Option<f64>) {
     if let Err(e) = || -> std::io::Result<()> {
-        let input_path = gyroflow_core::filesystem::url_to_path(input_url);
-        let output_path = gyroflow_core::filesystem::url_to_path(output_url);
+        let input_path = fpvflow_core::filesystem::url_to_path(input_url);
+        let output_path = fpvflow_core::filesystem::url_to_path(output_url);
         if input_path.is_empty() || output_path.is_empty() {
             return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("Can't get path from url! Input: {input_url} / {input_path}, output: {output_url} / {output_path}")));
         }
@@ -514,7 +514,7 @@ pub fn is_store_package() -> bool {
     }
 
     // Only the app from App Store is sandboxed on MacOS
-    if cfg!(target_os = "macos") && gyroflow_core::filesystem::is_sandboxed() {
+    if cfg!(target_os = "macos") && fpvflow_core::filesystem::is_sandboxed() {
         return true;
     }
 
@@ -524,18 +524,18 @@ pub fn is_store_package() -> bool {
 pub fn is_insta360(input_url: &str) -> bool {
     use std::io::*;
     let mut buf = vec![0u8; 32];
-    if let Ok(mut input) = gyroflow_core::filesystem::open_file(input_url, false, false) {
+    if let Ok(mut input) = fpvflow_core::filesystem::open_file(input_url, false, false) {
         let _ = input.seek(SeekFrom::End(-32));
         let _ = input.read_exact(&mut buf);
     }
     &buf == b"8db42d694ccc418790edff439fe026bf"
 }
-pub fn copy_insta360_metadata(output_url: &str, input_url: &str) -> Result<(), gyroflow_core::filesystem::FilesystemError> {
+pub fn copy_insta360_metadata(output_url: &str, input_url: &str) -> Result<(), fpvflow_core::filesystem::FilesystemError> {
     use std::io::*;
     pub const HEADER_SIZE: usize = 32 + 4 + 4 + 32; // padding(32), size(4), version(4), magic(32)
     pub const MAGIC: &[u8] = b"8db42d694ccc418790edff439fe026bf";
 
-    let mut input = gyroflow_core::filesystem::open_file( input_url, false, false)?;
+    let mut input = fpvflow_core::filesystem::open_file( input_url, false, false)?;
 
     let mut buf = vec![0u8; HEADER_SIZE];
     input.seek(SeekFrom::End(-(HEADER_SIZE as i64)))?;
@@ -544,7 +544,7 @@ pub fn copy_insta360_metadata(output_url: &str, input_url: &str) -> Result<(), g
         let extra_size = u32::from_le_bytes(buf[32..36].try_into().unwrap()) as i64;
         input.seek(SeekFrom::End(-extra_size))?;
 
-        let mut output = gyroflow_core::filesystem::open_file( output_url, true, false)?;
+        let mut output = fpvflow_core::filesystem::open_file( output_url, true, false)?;
         output.seek(SeekFrom::End(0))?;
         std::io::copy(&mut input, &mut output.get_file())?;
     }
@@ -555,7 +555,7 @@ pub fn copy_insta360_metadata(output_url: &str, input_url: &str) -> Result<(), g
 pub fn report_lens_profile_usage(checksum: Option<String>) {
     if let Some(checksum) = checksum {
         if !checksum.is_empty() {
-            gyroflow_core::run_threaded(move || {
+            fpvflow_core::run_threaded(move || {
                 let url = format!("https://api.gyroflow.xyz/usage?checksum={checksum}");
 
                 if let Ok(body) = ureq::get(url).call() {

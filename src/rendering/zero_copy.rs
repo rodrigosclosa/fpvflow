@@ -6,7 +6,7 @@
 
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame::Video;
-use gyroflow_core::gpu::{ BufferDescription, BufferSource };
+use fpvflow_core::gpu::{ BufferDescription, BufferSource };
 
 #[derive(Default)]
 pub struct RenderGlobals {
@@ -66,13 +66,13 @@ pub fn get_plane_size(frame: &Video, plane: usize) -> (usize, usize) {
     }
 }
 
-pub fn get_plane_buffer<'a>(frame: &'a mut Video, size: (usize, usize), plane_index: usize, render_globals: &mut RenderGlobals, wgpu_format: Option<gyroflow_core::WgpuTextureFormat>) -> BufferDescription<'a> {
+pub fn get_plane_buffer<'a>(frame: &'a mut Video, size: (usize, usize), plane_index: usize, render_globals: &mut RenderGlobals, wgpu_format: Option<fpvflow_core::WgpuTextureFormat>) -> BufferDescription<'a> {
     match frame.format() {
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         Pixel::VIDEOTOOLBOX => {
             let cache = render_globals.tex_cache.get_or_insert_with(|| mac_ffi::MetalTextureCache::new().unwrap()); // TODO: unwrap
 
-            let f = gyroflow_core::gpu::wgpu_interop_metal::format_wgpu_to_metal(wgpu_format.unwrap()); // TODO: unwrap
+            let f = fpvflow_core::gpu::wgpu_interop_metal::format_wgpu_to_metal(wgpu_format.unwrap()); // TODO: unwrap
 
             let ftex = cache.get_texture_for_plane(frame, size, f, plane_index, false);
 

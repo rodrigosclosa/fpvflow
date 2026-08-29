@@ -23,18 +23,18 @@ pub struct MDKProcessor {
 }
 impl Drop for MDKProcessor {
     fn drop(&mut self) {
-        gyroflow_core::filesystem::stop_accessing_url(&self.url, false);
+        fpvflow_core::filesystem::stop_accessing_url(&self.url, false);
     }
 }
 
 impl MDKProcessor {
     pub fn from_file(url: &str, decoder_options: Option<Dictionary>, gpu_edcoding: bool) -> Self {
-        gyroflow_core::filesystem::start_accessing_url(url, false);
+        fpvflow_core::filesystem::start_accessing_url(url, false);
 
         let mut mdk = qml_video_rs::video_item::MDKVideoItem::default();
         let mut custom_decoder = String::new(); // eg. BRAW:format=rgba64le
         let mut format = ffmpeg_next::format::Pixel::RGBA;
-        let filename = gyroflow_core::filesystem::get_filename(url);
+        let filename = fpvflow_core::filesystem::get_filename(url);
 
         let mut options: String = decoder_options.map(|x| x.into_iter().map(|x| format!("{}={}", x.0, x.1)).join(":")).unwrap_or_default();
         if !options.is_empty() { options.insert(0, ':'); }

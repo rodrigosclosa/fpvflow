@@ -17,7 +17,7 @@ pub struct VideoProcessor<'a> {
 
 impl<'a> VideoProcessor<'a> {
     pub fn from_file( url: &str, gpu_decoding: bool, gpu_decoder_index: usize, decoder_options: Option<Dictionary>) -> Result<Self, FFmpegError> {
-        let filename = gyroflow_core::filesystem::get_filename(url);
+        let filename = fpvflow_core::filesystem::get_filename(url);
         if filename.to_lowercase().ends_with(".braw") || filename.to_lowercase().ends_with(".r3d") || filename.to_lowercase().ends_with(".nev") {
             Ok(Self { inner: Processor::Mdk(MDKProcessor::from_file(url, decoder_options, gpu_decoding)) })
         } else {
@@ -26,7 +26,7 @@ impl<'a> VideoProcessor<'a> {
     }
 
     pub fn get_video_info(url: &str) -> Result<crate::rendering::ffmpeg_processor::VideoInfo, ffmpeg_next::Error> {
-        let filename = gyroflow_core::filesystem::get_filename(url);
+        let filename = fpvflow_core::filesystem::get_filename(url);
         if filename.to_lowercase().ends_with(".braw") || filename.to_lowercase().ends_with(".r3d") || filename.to_lowercase().ends_with(".nev") {
             let mut mdk = MDKProcessor::from_file(url, None, false);
 

@@ -5,8 +5,8 @@
 
 use std::collections::BTreeMap;
 
-use gyroflow_core::stabilization_params::StabilizationParams;
-use gyroflow_core::keyframes::{ KeyframeManager, KeyframeType };
+use fpvflow_core::stabilization_params::StabilizationParams;
+use fpvflow_core::keyframes::{ KeyframeManager, KeyframeType };
 use qmetaobject::*;
 use crate::core::gyro_source::{ GyroSource, TimeIMU, TimeQuat };
 use crate::util;
@@ -427,13 +427,13 @@ impl TimelineGyroChart {
             let fps = params.get_scaled_fps();
             let max = *params.fovs.iter().max_by(|a, b| a.total_cmp(b)).unwrap_or(&1.0);
             self.fovs = params.fovs.iter().enumerate().map(|(i, x)| ChartData {
-                timestamp_us: (gyroflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64,
+                timestamp_us: (fpvflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64,
                 values: [max - *x]
             }).collect();
             Self::normalize_height(&mut self.fovs, None);
 
             self.minimal_fovs = params.minimal_fovs.iter().zip(params.fovs.iter()).enumerate().map(|(i, (min_fov, fov))| {
-                let timestamp_us = (gyroflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64;
+                let timestamp_us = (fpvflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64;
 
                 let fov_scale = keyframes.value_at_video_timestamp(&KeyframeType::Fov, timestamp_us as f64 / 1000.0).unwrap_or(params.fov);
 
@@ -444,7 +444,7 @@ impl TimelineGyroChart {
             }).collect();
 
             // Populate focal length series
-            let ts = |i: usize| (gyroflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64;
+            let ts = |i: usize| (fpvflow_core::timestamp_at_frame(i as i32, fps) * 1000.0).round() as i64;
             self.focal_lengths = params.focal_lengths.iter().enumerate()
                 .filter_map(|(i, v)| v.map(|x| ChartData { timestamp_us: ts(i), values: [x] }))
                 .collect();

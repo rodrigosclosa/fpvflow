@@ -417,7 +417,7 @@ pub struct Controller {
     ///
     /// It lives in the controller and not in the `StabilizationManager` because
     /// stabilization never needs it - only the waveform lane and the export do.
-    pub external_audio: Option<gyroflow_core::audio::AudioTrack>,
+    pub external_audio: Option<fpvflow_core::audio::AudioTrack>,
     /// Offset the preview file on disk was written with, to skip rewriting it
     /// when nothing changed since the last playback.
     external_audio_preview_offset: Option<f64>,
@@ -452,7 +452,7 @@ impl Controller {
         self.keyframes_changed();
         self.update_offset_model();
 
-        *self.stabilizer.input_file.write() = gyroflow_core::InputFile {
+        *self.stabilizer.input_file.write() = fpvflow_core::InputFile {
             url: url.clone(),
             project_file_url: None,
             image_sequence_start: self.image_sequence_start,
@@ -824,7 +824,7 @@ impl Controller {
         let url = util::qurl_to_encoded(url);
         let stab = self.stabilizer.clone();
         let filename = filesystem::get_filename(&url);
-        let mut load_options = gyroflow_core::gyro_source::FileLoadOptions::default();
+        let mut load_options = fpvflow_core::gyro_source::FileLoadOptions::default();
         load_options.project_version = project_version as _;
 
         if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
@@ -925,7 +925,7 @@ impl Controller {
                     additional_obj.insert("contains_quats".to_owned(),    serde_json::Value::Bool(has_quats));
                     additional_obj.insert("contains_motion".to_owned(),   serde_json::Value::Bool(has_motion));
                     additional_obj.insert("has_accurate_timestamps".to_owned(), serde_json::Value::Bool(file_metadata.has_accurate_timestamps));
-                    additional_obj.insert("sample_rate".to_owned(),       serde_json::to_value(gyroflow_core::gyro_source::GyroSource::get_sample_rate(&*file_metadata)).unwrap());
+                    additional_obj.insert("sample_rate".to_owned(),       serde_json::to_value(fpvflow_core::gyro_source::GyroSource::get_sample_rate(&*file_metadata)).unwrap());
                     let has_builtin_profile = file_metadata.lens_profile.as_ref().map(|y| y.is_object()).unwrap_or_default();
                     let md_data = file_metadata.additional_data.clone();
                     if let Some(md_fps) = file_metadata.frame_rate {
@@ -958,7 +958,7 @@ impl Controller {
                     drop(camera_id);
 
                     if md_data.is_object() {
-                        gyroflow_core::util::merge_json(&mut additional_data, &md_data);
+                        fpvflow_core::util::merge_json(&mut additional_data, &md_data);
                     }
 
                     additional_data.as_object_mut().unwrap().insert("frame_readout_time".to_owned(), serde_json::to_value(stab.params.read().frame_readout_time.abs()).unwrap());
@@ -984,9 +984,9 @@ impl Controller {
     }
     fn load_default_preset(&mut self) {
         // Assumes regular filesystem
-        let local_path = gyroflow_core::lens_profile_database::LensProfileDatabase::get_path().join("default.gyroflow");
+        let local_path = fpvflow_core::lens_profile_database::LensProfileDatabase::get_path().join("default.gyroflow");
 
-        let settings_path = gyroflow_core::settings::data_dir().join("lens_profiles").join("default.gyroflow");
+        let settings_path = fpvflow_core::settings::data_dir().join("lens_profiles").join("default.gyroflow");
         if settings_path.exists() {
             self.import_gyroflow_file(QUrl::from(QString::from(filesystem::path_to_url(&settings_path.to_string_lossy()))));
         } else if local_path.exists() {
@@ -1078,7 +1078,7 @@ impl Controller {
         }
     }
     fn init_player(&self, player: QJSValue) {
-        use gyroflow_core::stabilization::RGBA8;
+        use fpvflow_core::stabilization::RGBA8;
 
         if let Some(vid) = player.to_qobject::<MDKVideoItem>() {
             let vid1 = unsafe { &mut *vid.as_ptr() }; // vid.borrow_mut()
@@ -1103,7 +1103,7 @@ impl Controller {
                 }
             }));
 
-            use gyroflow_core::gpu::{ BufferDescription, Buffers, BufferSource };
+            use fpvflow_core::gpu::{ BufferDescription, Buffers, BufferSource };
 
             let stab = self.stabilizer.clone();
             vid.readyForProcessing(Box::new(move || -> bool {
@@ -1345,7 +1345,7 @@ impl Controller {
     fn get_color_lut_path(&self) -> QString {
         let path = self.stabilizer.color_lut_path();
         if path.is_empty() { return QString::default(); }
-        QString::from(gyroflow_core::filesystem::display_url(&path))
+        QString::from(fpvflow_core::filesystem::display_url(&path))
     }
 
     fn set_color_lut_amount(&mut self, amount: f64) {
@@ -1377,7 +1377,7 @@ impl Controller {
 
         // list_folder returns directories too, so the extension filter is what
         // keeps them out - and it is case-insensitive because .CUBE is common.
-        let mut entries: Vec<_> = gyroflow_core::filesystem::list_folder(&folder)
+        let mut entries: Vec<_> = fpvflow_core::filesystem::list_folder(&folder)
             .into_iter()
             .filter(|(name, _)| name.to_ascii_lowercase().ends_with(".cube"))
             .map(|(name, url)| serde_json::json!({ "name": name, "url": url }))
@@ -1454,7 +1454,7 @@ impl Controller {
 
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         {
-            gyroflow_core::settings::set("lastProject", filesystem::url_to_path(&url).into());
+            fpvflow_core::settings::set("lastProject", filesystem::url_to_path(&url).into());
         }
         let finished = util::qt_queued_callback(QPointer::from(self as &Self), move |this, (res, arg): (&str, String)| {
             match res {
@@ -1559,7 +1559,7 @@ impl Controller {
             this.loading_gyro_progress(progress);
             this.loading_gyro_in_progress_changed();
         });
-        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, gyroflow_core::GyroflowCoreError>| {
+        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, fpvflow_core::GyroflowCoreError>| {
             this.loading_gyro_in_progress = false;
             this.loading_gyro_progress(1.0);
             this.loading_gyro_in_progress_changed();
@@ -1587,7 +1587,7 @@ impl Controller {
             this.loading_gyro_progress(progress);
             this.loading_gyro_in_progress_changed();
         });
-        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, gyroflow_core::GyroflowCoreError>| {
+        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, fpvflow_core::GyroflowCoreError>| {
             this.loading_gyro_in_progress = false;
             this.loading_gyro_progress(1.0);
             this.loading_gyro_in_progress_changed();
@@ -1609,7 +1609,7 @@ impl Controller {
             finished(stab.import_gyroflow_data(data.to_string().as_bytes(), false, None, progress, cancel_flag, &mut is_preset, false));
         });
     }
-    fn import_gyroflow_internal(&mut self, result: Result<serde_json::Value, gyroflow_core::GyroflowCoreError>) -> QJsonObject {
+    fn import_gyroflow_internal(&mut self, result: Result<serde_json::Value, fpvflow_core::GyroflowCoreError>) -> QJsonObject {
         match result {
             Ok(thin_obj) => {
                 if thin_obj.as_object().unwrap().contains_key("calibration_data") {
@@ -1724,7 +1724,7 @@ impl Controller {
         // fails and nothing is loaded (see load_video, which does the same).
         filesystem::start_accessing_url(&url, false);
 
-        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, res: Result<gyroflow_core::audio::AudioTrack, String>| {
+        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, res: Result<fpvflow_core::audio::AudioTrack, String>| {
             this.external_audio_loading = false;
             this.external_audio_loading_changed();
 
@@ -1754,7 +1754,7 @@ impl Controller {
         self.external_audio_loading_changed();
 
         std::thread::spawn(move || {
-            finished(gyroflow_core::audio::decode::decode_file(&url).map_err(|e| e.to_string()));
+            finished(fpvflow_core::audio::decode::decode_file(&url).map_err(|e| e.to_string()));
         });
     }
 
@@ -1793,7 +1793,7 @@ impl Controller {
     /// Path of the loaded track, in readable form.
     fn get_external_audio_path(&self) -> QString {
         match &self.external_audio {
-            Some(track) => QString::from(gyroflow_core::filesystem::display_url(&track.path)),
+            Some(track) => QString::from(fpvflow_core::filesystem::display_url(&track.path)),
             None => QString::default(),
         }
     }
@@ -1826,10 +1826,10 @@ impl Controller {
     ///
     /// Compares the energy envelope of the audio in the blade band with the
     /// envelope of the vibration read by the gyroscope. See
-    /// `gyroflow_core::audio::features` for why the comparison is done between
+    /// `fpvflow_core::audio::features` for why the comparison is done between
     /// energy envelopes and not between spectra.
     fn auto_sync_external_audio(&mut self, auto_band: bool, band_lo_hz: f64, band_hi_hz: f64, highpass_hz: f64) {
-        use gyroflow_core::audio::features::FeatureParams;
+        use fpvflow_core::audio::features::FeatureParams;
 
         if self.external_audio_syncing { return; }
 
@@ -1934,9 +1934,9 @@ impl Controller {
 
     /// Correlates the audio against the motion data. Pure computation, off the UI
     /// thread; returns `(offset_seconds, confidence, used_onset_method)`.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], params: &gyroflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
-        use gyroflow_core::audio::features::{audio_envelope, gyro_envelope};
-        use gyroflow_core::audio::sync::cross_correlate;
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+        use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
+        use fpvflow_core::audio::sync::cross_correlate;
 
         let (audio_env, env_rate) = audio_envelope(mono, sample_rate, params);
         if audio_env.is_empty() || env_rate <= 0.0 {
@@ -1959,7 +1959,7 @@ impl Controller {
         let use_onset = gyro_rate < MIN_GYRO_RATE_FOR_BLADE_BAND;
 
         let (result, method) = if use_onset {
-            use gyroflow_core::audio::features::{audio_energy_envelope, gyro_motion_envelope, onset_strength};
+            use fpvflow_core::audio::features::{audio_energy_envelope, gyro_motion_envelope, onset_strength};
 
             // Low enough for the few motion points to fill the grid, and high
             // enough to give useful precision.
@@ -2057,7 +2057,7 @@ impl Controller {
 
         // Writing the whole track takes long enough to be noticed on a long clip.
         std::thread::spawn(move || {
-            let ok = match gyroflow_core::audio::export::write_preview_wav(&track, duration_s, &path) {
+            let ok = match fpvflow_core::audio::export::write_preview_wav(&track, duration_s, &path) {
                 Ok(()) => true,
                 Err(e) => {
                     ::log::error!("Failed to write the audio preview file: {e}");
@@ -2073,13 +2073,13 @@ impl Controller {
             // recommendation becomes the compact codec instead of the one that
             // would keep the source bit for bit.
             Some(track) if !track.preserve_original_format => QString::from("AAC"),
-            Some(track) => QString::from(gyroflow_core::audio::export::recommended_codec(track.source_format)),
+            Some(track) => QString::from(fpvflow_core::audio::export::recommended_codec(track.source_format)),
             None => QString::default(),
         }
     }
 
     fn get_external_audio_format_status(&self, extension: QString) -> QString {
-        use gyroflow_core::audio::export::{check_format_compatibility, FormatCompatibility};
+        use fpvflow_core::audio::export::{check_format_compatibility, FormatCompatibility};
 
         let Some(track) = &self.external_audio else {
             return QString::default();
@@ -2588,7 +2588,7 @@ impl Controller {
         let current_version = self.stabilizer.lens_profile_db.read().version;
 
         let db_path = LensProfileDatabase::get_path().join("profiles.cbor.gz");
-        if db_path.exists() || gyroflow_core::settings::data_dir().join("lens_profiles").exists() {
+        if db_path.exists() || fpvflow_core::settings::data_dir().join("lens_profiles").exists() {
             core::run_threaded(move || {
                 if let Ok(Ok(body)) = ureq::get("https://api.github.com/repos/gyroflow/lens_profiles/releases").call().map(|x| x.into_body().read_to_string()) {
                     (|| -> Option<()> {
@@ -2610,7 +2610,7 @@ impl Controller {
                                                 }
                                             }
                                             if !updated {
-                                                if let Ok(mut file) = std::fs::File::create(gyroflow_core::settings::data_dir().join("lens_profiles").join("profiles.cbor.gz")) {
+                                                if let Ok(mut file) = std::fs::File::create(fpvflow_core::settings::data_dir().join("lens_profiles").join("profiles.cbor.gz")) {
                                                     if std::io::copy(&mut content, &mut file).is_ok() {
                                                         update(());
                                                     }
@@ -2665,7 +2665,7 @@ impl Controller {
         let save_type = save_type.to_string();
         let mut url = util::qurl_to_encoded(url);
         if url.is_empty() {
-            let path = gyroflow_core::settings::data_dir().join("lens_profiles");
+            let path = fpvflow_core::settings::data_dir().join("lens_profiles");
             match save_type.as_ref() {
                 "lens" => {
                     url = filesystem::path_to_url(path.join(&format!("{preset_name}.gyroflow")).to_str().unwrap_or_default())
@@ -2685,7 +2685,7 @@ impl Controller {
 
     fn export_full_metadata(&self, url: QUrl, gyro_url: QUrl) {
         let result = || -> Result<(), core::GyroflowCoreError> {
-            let contents = gyroflow_core::gyro_export::export_full_metadata(&util::qurl_to_encoded(gyro_url), &self.stabilizer)?;
+            let contents = fpvflow_core::gyro_export::export_full_metadata(&util::qurl_to_encoded(gyro_url), &self.stabilizer)?;
             Ok(filesystem::write(&util::qurl_to_encoded(url), contents.as_bytes())?)
         };
         if let Err(e) = result() {
@@ -2703,7 +2703,7 @@ impl Controller {
         let url = util::qurl_to_encoded(url);
         let filename = filesystem::get_filename(&url).to_ascii_lowercase();
 
-        let contents = gyroflow_core::gyro_export::export_gyro_data(&filename, fields.to_json().to_str().unwrap(), &self.stabilizer);
+        let contents = fpvflow_core::gyro_export::export_gyro_data(&filename, fields.to_json().to_str().unwrap(), &self.stabilizer);
         if let Err(e) = filesystem::write(&url, contents.as_bytes()) {
             self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
         }
@@ -2825,7 +2825,7 @@ impl Controller {
         let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (percent, sdk_name, error_string): (f64, &'static str, String)| {
             this.external_sdk_progress(percent, QString::from(sdk_name), QString::from(error_string), QString::from(url.clone()));
         });
-        let sdkbase = gyroflow_core::settings::get_str("sdkBase", "");
+        let sdkbase = fpvflow_core::settings::get_str("sdkBase", "");
         crate::external_sdk::install(&filename, &sdkbase, progress);
     }
 
@@ -2898,7 +2898,7 @@ impl Controller {
             }
         });
     }
-    fn merge_gcsv(file_list: &[String], output_folder: &str, output_filename: &str) -> Result<(), gyroflow_core::GyroflowCoreError> {
+    fn merge_gcsv(file_list: &[String], output_folder: &str, output_filename: &str) -> Result<(), fpvflow_core::GyroflowCoreError> {
         use std::io::{ BufRead, Write, Seek, SeekFrom };
         let mut last_diff = 0.0;
         let mut last_timestamp = 0.0;
@@ -3063,7 +3063,7 @@ impl Controller {
 
         core::run_threaded(move || {
             progress((0, total));
-            for (fname_base, frame, dist, undist) in gyroflow_core::stmap::generate_stmaps(&stab, per_frame) {
+            for (fname_base, frame, dist, undist) in fpvflow_core::stmap::generate_stmaps(&stab, per_frame) {
                 if let Err(e) = filesystem::write(&filesystem::get_file_url(&folder_url, &format!("{fname_base}-undistort-{frame}.exr"), true), &undist) {
                     return err(e.to_string());
                 }
@@ -3097,7 +3097,7 @@ impl Controller {
                         this.nle_plugins_result(command2.clone(), QString::from(r));
                     });
                     core::run_threaded(move || {
-                        let plugins_base = gyroflow_core::settings::get_str("pluginsBase", "");
+                        let plugins_base = fpvflow_core::settings::get_str("pluginsBase", "");
                         let result = match command.as_ref() {
                             "install" => crate::nle_plugins::install(&typ, plugins_base),
                             "latest_version" => crate::nle_plugins::latest_version().ok_or(std::io::Error::new(std::io::ErrorKind::Other, "Failed to check version")),
@@ -3126,7 +3126,7 @@ impl Controller {
     fn get_username(&self) -> QString { let realname = whoami::realname().unwrap_or_default(); QString::from(if realname.is_empty() { whoami::username().unwrap_or_default() } else { realname }) }
     fn image_to_b64(&self, img: QImage) -> QString { util::image_to_b64(img) }
     fn copy_to_clipboard(&self, text: QString) { util::copy_to_clipboard(text) }
-    fn data_folder(&self) -> QUrl { QUrl::from(QString::from(gyroflow_core::filesystem::path_to_url(gyroflow_core::settings::data_dir().to_str().unwrap_or_default()))) }
+    fn data_folder(&self) -> QUrl { QUrl::from(QString::from(fpvflow_core::filesystem::path_to_url(fpvflow_core::settings::data_dir().to_str().unwrap_or_default()))) }
 }
 
 #[derive(Default, QObject)]
@@ -3175,11 +3175,11 @@ impl Filesystem {
     fn save_allowed_folders(&self) {
         let list = filesystem::get_allowed_folders();
         if !list.is_empty() {
-            gyroflow_core::settings::set("allowedUrls", list.into());
+            fpvflow_core::settings::set("allowedUrls", list.into());
         }
     }
     fn restore_allowed_folders(&self) {
-        if let Ok(saved) = serde_json::from_value::<Vec<String>>(gyroflow_core::settings::get("allowedUrls", Default::default())) {
+        if let Ok(saved) = serde_json::from_value::<Vec<String>>(fpvflow_core::settings::get("allowedUrls", Default::default())) {
             if !saved.is_empty() {
                 filesystem::restore_allowed_folders(&saved);
             }

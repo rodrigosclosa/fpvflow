@@ -153,7 +153,7 @@ deploy *param:
     # Copy-Item -Path "$ProjectDir\_deployment\android\src" -Destination "$ProjectDir\target\android-build\" -Recurse -Force
     Copy-Item -Path "$ProjectDir\target\aarch64-linux-android\$Env:BUILD_PROFILE\libffmpeg.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\" -Force
     # Copy-Item -Path "$ProjectDir\target\aarch64-linux-android\$Env:BUILD_PROFILE\libqtav-mediacodec.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\" -Force
-    Move-Item -Path "$ProjectDir\target\android-build\libs\arm64-v8a\libgyroflow.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\libgyroflow_arm64-v8a.so" -Force
+    Move-Item -Path "$ProjectDir\target\android-build\libs\arm64-v8a\libfpvflow.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\libfpvflow_arm64-v8a.so" -Force
 
     $qtlibs = @(
         "libQt6Core_arm64-v8a.so",
@@ -220,8 +220,8 @@ deploy *param:
     # Strip all libs
     . "$Env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" "$ProjectDir\target\android-build\libs\arm64-v8a\*.so"
 
-    # Copy unstripped libgyroflow.so
-    Copy-Item -Path "$ProjectDir\target\$Env:BUILD_PROFILE\apk\lib\arm64-v8a\libgyroflow.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\libgyroflow_arm64-v8a.so" -Force
+    # Copy unstripped libfpvflow.so
+    Copy-Item -Path "$ProjectDir\target\$Env:BUILD_PROFILE\apk\lib\arm64-v8a\libfpvflow.so" -Destination "$ProjectDir\target\android-build\libs\arm64-v8a\libfpvflow_arm64-v8a.so" -Force
 
     $androiddeploy = @"
     {
@@ -247,7 +247,7 @@ deploy *param:
         "qml-root-path": "$PROJECT_DIR_UNIX/src",
         "stdcpp-path": "$NDK_REPLACED/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib",
         "qrcFiles": "",
-        "application-binary": "gyroflow"
+        "application-binary": "fpvflow"
     }
     "@
     $androiddeploy | Out-File -encoding utf8 -FilePath "$ProjectDir\target\android-build\android-deploy.json"

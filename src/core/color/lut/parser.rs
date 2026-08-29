@@ -72,7 +72,7 @@ impl std::error::Error for LutParseError {}
 
 /// Reads a `.cube` file from disk.
 ///
-/// Goes through [`filesystem::open_file`](gyroflow_core::filesystem) so it works
+/// Goes through [`filesystem::open_file`](fpvflow_core::filesystem) so it works
 /// on Android too, where a path is not necessarily a path.
 pub fn parse_cube(url: &str) -> Result<Lut, LutParseError> {
     let mut file =

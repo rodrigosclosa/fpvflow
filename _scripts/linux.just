@@ -345,8 +345,8 @@ deploy *param:
         curl -L https://api.gyroflow.xyz/sdk/libshaderc_shared.so -o "$TARGET/lib/libshaderc_shared.so"
     fi
 
-    cp -f "$CARGO_TARGET/gyroflow"                         "$TARGET/"
-    strip "$TARGET/gyroflow"
+    cp -f "$CARGO_TARGET/fpvflow"                         "$TARGET/"
+    strip "$TARGET/fpvflow"
 
     # cp -rf "$PROJECT_DIR/resources/camera_presets"         "$TARGET/"
     # rm -rf "$TARGET/camera_presets/.git"

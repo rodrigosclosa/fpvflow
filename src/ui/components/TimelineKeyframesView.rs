@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, str::FromStr};
 
-use gyroflow_core::keyframes::*;
+use fpvflow_core::keyframes::*;
 use qmetaobject::*;
 use crate::util;
 

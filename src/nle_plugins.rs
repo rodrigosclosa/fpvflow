@@ -86,7 +86,7 @@ fn copy_files(tempdir: &str, extract_path: &str, typ: &str) -> io::Result<()> {
     let output = if cfg!(target_os = "windows") {
         Command::new("xcopy").args(&[tempdir, extract_path, "/Y", "/E", "/H", "/I"]).output()?.status.success()
     } else if cfg!(target_os = "macos") {
-        if gyroflow_core::filesystem::is_sandboxed() {
+        if fpvflow_core::filesystem::is_sandboxed() {
             let macosname = match typ {
                 "openfx" => "Gyroflow.ofx.bundle",
                 "adobe" => "Gyroflow.plugin",
@@ -94,13 +94,13 @@ fn copy_files(tempdir: &str, extract_path: &str, typ: &str) -> io::Result<()> {
             };
             let src = Path::new(tempdir).join(macosname);
             let target = Path::new(extract_path).join(macosname);
-            gyroflow_core::filesystem::start_accessing_url(extract_path, true);
+            fpvflow_core::filesystem::start_accessing_url(extract_path, true);
             match std::fs::create_dir_all(&target) {
                 Ok(_) => log::info!("Folder created at {target:?}"),
                 Err(e) => log::error!("Failed to create folder at {target:?}: {e:?}")
             }
             let result = fs_extra::copy_items(&[src.as_path()], &extract_path, &fs_extra::dir::CopyOptions::new().overwrite(true).copy_inside(true));
-            gyroflow_core::filesystem::stop_accessing_url(extract_path, true);
+            fpvflow_core::filesystem::stop_accessing_url(extract_path, true);
             match result {
                 Ok(_) => log::info!("Folder copied from {src:?} to {extract_path:?}"),
                 Err(e) => {

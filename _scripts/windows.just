@@ -278,7 +278,7 @@ deploy:
     xcopy /Y "$CargoTarget\mdk.dll"                                      "$TargetDir\"
     xcopy /Y "$CargoTarget\mdk-braw.dll"                                 "$TargetDir\"
     xcopy /Y "$CargoTarget\mdk-r3d.dll"                                  "$TargetDir\"
-    echo F | xcopy /Y "$CargoTarget\gyroflow.exe"                        "$TargetDir\FPVFlow.exe"
+    echo F | xcopy /Y "$CargoTarget\fpvflow.exe"                        "$TargetDir\FPVFlow.exe"
     xcopy /Y "$ProjectDir\_deployment\windows\FPVFlow_with_console.bat" "$TargetDir\"
     # xcopy /Y /E "$ProjectDir\resources\camera_presets\*"                 "$TargetDir\camera_presets\"
     mkdir "$TargetDir\camera_presets\" -Force
