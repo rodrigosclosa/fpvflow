@@ -1213,7 +1213,7 @@ impl StabilizationManager {
     }
 
     pub fn get_cloned(&self) -> StabilizationManager {
-        StabilizationManager {
+        let new = StabilizationManager {
             params: Arc::new(RwLock::new(self.params.read().clone())),
             gyro:   Arc::new(RwLock::new(self.gyro.read().clone())),
             lens:   Arc::new(RwLock::new(self.lens.read().clone())),
@@ -1232,7 +1232,27 @@ impl StabilizationManager {
             // prevent_recompute
             // camera_id
             ..Default::default()
+        };
+
+        // `stabilization` is deliberately not cloned - it owns GPU handles that
+        // must not be shared. But the color state lives there too, and it is
+        // plain data, so it has to be carried over by hand: the render queue
+        // builds its job from this clone, and without this the export comes out
+        // ungraded while the preview looks right.
+        {
+            let src = self.stabilization.read();
+            let lut = src.color_lut_arc();
+            let amount = src.color_lut_amount();
+            let adjustments = src.color_adjustments();
+            drop(src);
+
+            let mut dst = new.stabilization.write();
+            dst.set_color_lut(lut);
+            dst.set_color_lut_amount(amount);
+            dst.set_color_adjustments(adjustments);
         }
+
+        new
     }
     pub fn set_render_params(&self, size: (usize, usize), output_size: (usize, usize)) {
         self.params.write().framebuffer_inverted = false;

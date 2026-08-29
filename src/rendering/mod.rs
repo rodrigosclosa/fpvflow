@@ -649,8 +649,15 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         // but the dispatch below runs every time and has to agree with it. Both
         // read this same flag so they cannot drift apart.
         let needs_rgb_for_lut = {
-            let has_lut = stab.stabilization.read().color_lut().is_some();
-            has_lut && !matches!(input_frame.format(), Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE)
+            let src = stab.stabilization.read();
+            // The adjustments need all three channels of a pixel just as much as
+            // the LUT does - saturation, white balance and vibrance are all
+            // cross-channel - so grading with no LUT loaded has to take the same
+            // detour. Without this, an adjustments-only export silently does
+            // nothing on planar YUV.
+            let needs_rgb = src.color_lut().is_some() || !src.color_adjustments().is_identity();
+            drop(src);
+            needs_rgb && !matches!(input_frame.format(), Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE)
         };
 
         if planes.is_empty() {
@@ -678,7 +685,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             // handled here, which keeps 10 and 12 bit sources from being
             // flattened to 8.
             if needs_rgb_for_lut {
-                log::info!("Color LUT active: routing {format:?} through RGBA64BE so the LUT sees full RGB");
+                log::info!("Color grading active: routing {format:?} through RGBA64BE so the shader sees full RGB");
                 create_planes_proc!(planes, (RGBA16, input_frame, output_frame, 0, [], 65535.0), );
             } else {
             match format {

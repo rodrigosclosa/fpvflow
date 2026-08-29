@@ -583,6 +583,37 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 // Adapted from OpenCV: initUndistortRectifyMap + remap
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
 // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
+// Unsharp mask on the stabilized frame, matching apply_sharpness in
+// wgpu_undistort.wgsl and undistort.frag - same taps, same 1.5 cap, so the
+// three backends agree. Like there, the neighbourhood is taken in source space
+// through sample_input_at and warped along with the centre pixel.
+//
+// Guarded the same way as the color stages: on a planar pass the .z access is
+// a compile error, not just a wrong result.
+DATA_TYPEF apply_sharpness(DATA_TYPEF pixel, float2 uv, float4 jac, __global const uchar *srcptr, __global KernelParams *params, __global const uchar *drawing, DATA_TYPEF bg) {
+#if PIX_ELEMENT_COUNT >= 3
+    float amount = params->color_adjust4.x;
+    if (amount <= 0.0f) { return pixel; }
+
+    // One source pixel in each direction.
+    DATA_TYPEF blur = (pixel * 4.0f
+                     + sample_input_at(uv + (float2)( 1.0f, 0.0f), jac, srcptr, params, drawing, bg)
+                     + sample_input_at(uv + (float2)(-1.0f, 0.0f), jac, srcptr, params, drawing, bg)
+                     + sample_input_at(uv + (float2)( 0.0f, 1.0f), jac, srcptr, params, drawing, bg)
+                     + sample_input_at(uv + (float2)( 0.0f,-1.0f), jac, srcptr, params, drawing, bg)) / 8.0f;
+    DATA_TYPEF high = pixel - blur;
+    DATA_TYPEF sharpened = pixel + high * (amount * 1.5f);
+
+    DATA_TYPEF outp = pixel;
+    outp.x = clamp(sharpened.x, 0.0f, params->max_pixel_value);
+    outp.y = clamp(sharpened.y, 0.0f, params->max_pixel_value);
+    outp.z = clamp(sharpened.z, 0.0f, params->max_pixel_value);
+    return outp;
+#else
+    return pixel;
+#endif
+}
+
 // Applies the color LUT with trilinear interpolation, done by hand.
 //
 // The table arrives as a plain float buffer, not an image3d_t: 3D image support
@@ -597,10 +628,14 @@ float2 undistort_coord(float2 out_pos, __global KernelParams *params, __global c
 // plane and DATA_TYPEF is float or float2, so hardcoding float4 fails to
 // compile with "assigning to ushort from ushort4".
 DATA_TYPEF apply_color_lut(DATA_TYPEF pixel, __global const float *lut, int n, __global KernelParams *params) {
+// Only packed RGB has three channels in one call; on a planar pass there is
+// nothing a 3D LUT can do, so leave the plane untouched. This has to be a
+// preprocessor branch, not a runtime one: the compiler type-checks the whole
+// body regardless of which path runs, and `pixel.z` on a float/float2 plane is
+// a hard error ("member reference base type 'float' is not a structure").
+#if PIX_ELEMENT_COUNT >= 3
     // With no LUT loaded the amount is 0, and this skips eight fetches per pixel.
-    // Only packed RGB has three channels in one call; on a planar pass there is
-    // nothing a 3D LUT can do, so leave the plane untouched.
-    if (params->lut_amount <= 0.0f || PIX_ELEMENT_COUNT < 3) { return pixel; }
+    if (params->lut_amount <= 0.0f) { return pixel; }
 
     float last = (float)(n - 1);
 
@@ -637,6 +672,9 @@ DATA_TYPEF apply_color_lut(DATA_TYPEF pixel, __global const float *lut, int n, _
     DATA_TYPEF outp = pixel;
     outp.x = outv.x; outp.y = outv.y; outp.z = outv.z;
     return outp;
+#else
+    return pixel;
+#endif
 }
 
 // Per-pixel color adjustments, applied after the LUT.
@@ -668,6 +706,9 @@ float3 tonal_band(float3 c, float amount, float e0, float e1, bool invert) {
 }
 
 DATA_TYPEF apply_color_adjustments(DATA_TYPEF pixel, float2 out_pos, __global KernelParams *params) {
+// Same reason as in apply_color_lut: the .z accesses below have to be compiled
+// out on planar passes, not merely skipped at runtime.
+#if PIX_ELEMENT_COUNT >= 3
     float exposure    = params->color_adjust1.x;
     float luminance   = params->color_adjust1.y;
     float contrast    = params->color_adjust1.z;
@@ -686,8 +727,6 @@ DATA_TYPEF apply_color_adjustments(DATA_TYPEF pixel, float2 out_pos, __global Ke
         tint == 0.0f && saturation == 0.0f && vibrance == 0.0f && vignette == 0.0f) {
         return pixel;
     }
-
-    if (PIX_ELEMENT_COUNT < 3) { return pixel; }
 
     float3 c = (float3)(pixel.x, pixel.y, pixel.z) / params->max_pixel_value;
 
@@ -728,6 +767,9 @@ DATA_TYPEF apply_color_adjustments(DATA_TYPEF pixel, float2 out_pos, __global Ke
     DATA_TYPEF outp = pixel;
     outp.x = c.x; outp.y = c.y; outp.z = c.z;
     return outp;
+#else
+    return pixel;
+#endif
 }
 
 __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstptr, __global const void *params_buf, __global const float *matrices, __global const uchar *drawing, __global const float *mesh_data, __global const float *lut) {
@@ -795,14 +837,14 @@ __kernel void undistort_image(__global const uchar *srcptr, __global uchar *dstp
                 // the overlays, so drawing and the safe area keep their own
                 // colors. This branch returns early - forgetting it would leave
                 // part of the frame ungraded.
-                final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(c1 * alpha + c2 * (1.0f - alpha), lut, LUT_SIZE, params), (float2)(x, y), params));
+                final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(apply_sharpness(c1 * alpha + c2 * (1.0f - alpha), uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params), (float2)(x, y), params));
                 draw_pixel(&final_pix, x, y, false, max(params->width, params->output_width), params, drawing);
                 draw_safe_area(&final_pix, x, y, params);
                 *out_pix = final_pix;
                 return;
             }
 
-            final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(sample_input_at(uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params), (float2)(x, y), params));
+            final_pix = DATA_CONVERT(apply_color_adjustments(apply_color_lut(apply_sharpness(sample_input_at(uv, jac, srcptr, params, drawing, bg), uv, jac, srcptr, params, drawing, bg), lut, LUT_SIZE, params), (float2)(x, y), params));
         } else {
             // Background, not image data - the user picked this color, so it is
             // deliberately left ungraded, like the two early returns above.
