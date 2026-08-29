@@ -9,9 +9,13 @@ AppDir:
   app_info:
     id: xyz.fpvflow
     name: FPVFlow
+    # The icon keeps its original filename (gyroflow.png/svg) on purpose, like
+    # the other derived assets. `exec` is different: it is the binary name, and
+    # the crate rename made that fpvflow - leaving it as gyroflow made
+    # appimage-builder fail with "No such file or directory: AppDir/gyroflow".
     icon: gyroflow
     version: !ENV ${APP_VERSION}
-    exec: gyroflow
+    exec: fpvflow
     exec_args: $@
   apt:
     arch:
