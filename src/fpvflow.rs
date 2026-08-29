@@ -148,8 +148,25 @@ fn entry() {
             MDKVideoItem::setGlobalOption("plugins", "mdk-braw");
         }
     } else {
+        // MDK keys are tied to the app's identity, so renaming to FPVFlow
+        // invalidated Gyroflow's - without a valid one MDK stamps a QR code onto
+        // the preview. wang-bin issued these two for this fork; Linux was not
+        // requested, so it keeps upstream's key below.
+        //
+        // Windows validates the RC file's "ProductName/CompanyName" appid,
+        // macOS the executable name and bundle id.
+        #[cfg(target_os = "windows")]
+        MDKVideoItem::setGlobalOption("MDK_KEY", "460BD5022ECE66CA15FCC82A63642AC9F3B2236C13313B7951FCA1B0376186DC27A890B3B668113AA04A36C5490B245FB559D33D650300CF349D\
+            422125F0F9065E0B2AFDD1319935EA0337D59C9BD536F3B2242A43677D153E8B5044E4482DD351B28F02485490B3BE3F0F759C2CB9DD9167990C9E4DC8D655D06AE0C6D1F906");
+
+        #[cfg(target_os = "macos")]
+        MDKVideoItem::setGlobalOption("MDK_KEY", "0080A40A650965877D8D4F31016B131C710F16FE0FF97A8AD290B8AE9C888F359DFAB40A62532BA18B84FB41FE1F770574AFCF8CB754ED480A14\
+            E3272A4A4F0201805BF59AF69A788272B0CEFE94ECE3710F1D86768354ECA2E6DEC2F3FF909841D305E98B052007E891DE66D45EF80A0499FB1DBA231161B20F784AE61D4F02");
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         MDKVideoItem::setGlobalOption("MDK_KEY", "47FA7B212D5FF2F649A245E6D8DC2D88BAB67C208282CB3E2DEB95B9B4F9EC575102303FB92448ED49454E027A31B48ED08824EB904B58F693AD\
             B52FA63A4008B80584DE2D5F0D09B65DBA192723D277B8B67447FBF0A4584184E2659155D95CFBEB08626CBE3C94416B2FC50B1FA1201AA7381CE3E85DF3F3BF9BCB59677808");
+
         MDKVideoItem::setGlobalOption("plugins", "mdk-braw:mdk-r3d");
     }
 

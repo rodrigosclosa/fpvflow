@@ -657,7 +657,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             // nothing on planar YUV.
             let needs_rgb = src.color_lut().is_some() || !src.color_adjustments().is_identity();
             drop(src);
-            needs_rgb && !matches!(input_frame.format(), Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE)
+            needs_rgb && !matches!(input_frame.format(), Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE | Pixel::RGB48LE | Pixel::RGBA64LE)
         };
 
         if planes.is_empty() {
@@ -681,11 +681,15 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             // intermediate is what makes the LUT correct. It costs two sws passes
             // per frame, so it only happens when a LUT is actually loaded.
             //
-            // RGBA64BE because it is the only high-precision RGB format already
-            // handled here, which keeps 10 and 12 bit sources from being
-            // flattened to 8.
+            // RGBA64LE, not BE: the RGBA16 pixel type reads u16 in native byte
+            // order, and every GPU this runs on is little-endian, so a
+            // big-endian frame arrives with both bytes of each channel swapped -
+            // 0x0123 read as 0x2301 - which comes out as colored noise. The
+            // match arms below still map RGBA64BE to RGBA16 the same way; that
+            // is upstream's, and it only ever worked because nothing reached it.
+            // 16-bit keeps 10 and 12 bit sources from being flattened to 8.
             if needs_rgb_for_lut {
-                log::info!("Color grading active: routing {format:?} through RGBA64BE so the shader sees full RGB");
+                log::info!("Color grading active: routing {format:?} through RGBA64LE so the shader sees full RGB");
                 create_planes_proc!(planes, (RGBA16, input_frame, output_frame, 0, [], 65535.0), );
             } else {
             match format {
@@ -763,8 +767,13 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
                 Pixel::AYUV64LE => { create_planes_proc!(planes, (AYUV16, input_frame, output_frame, 0, [3,0,1,2], 65535.0), ); },
                 Pixel::RGB24    => { create_planes_proc!(planes, (RGB8,   input_frame, output_frame, 0, [], 255.0), ); },
                 Pixel::RGBA     => { create_planes_proc!(planes, (RGBA8,  input_frame, output_frame, 0, [], 255.0), ); },
+                // RGB16/RGBA16 read u16 in native (little-endian) order, so the
+                // LE variants are the ones that are actually correct here. The
+                // BE arms are upstream's and are kept as they were.
                 Pixel::RGB48BE  => { create_planes_proc!(planes, (RGB16,  input_frame, output_frame, 0, [], 65535.0), ); },
                 Pixel::RGBA64BE => { create_planes_proc!(planes, (RGBA16, input_frame, output_frame, 0, [], 65535.0), ); },
+                Pixel::RGB48LE  => { create_planes_proc!(planes, (RGB16,  input_frame, output_frame, 0, [], 65535.0), ); },
+                Pixel::RGBA64LE => { create_planes_proc!(planes, (RGBA16, input_frame, output_frame, 0, [], 65535.0), ); },
                 format => { // All other convert to YUV444P16LE
                     ::log::info!("Unknown format {:?}, converting to YUV444P16LE", format);
                     // Go through 4:4:4 because of even plane dimensions
@@ -791,8 +800,9 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         };
 
         if needs_rgb_for_lut {
-            // Must match the plane set built above for this same flag.
-            converter.convert_pixel_format(input_frame, output_frame, Pixel::RGBA64BE, ffmpeg_interpolation, |converted_frame, converted_output| {
+            // Must match the plane set built above for this same flag, byte
+            // order included - see the comment there on why this is LE.
+            converter.convert_pixel_format(input_frame, output_frame, Pixel::RGBA64LE, ffmpeg_interpolation, |converted_frame, converted_output| {
                 undistort_frame(converted_frame, converted_output);
             })?;
             process_frame += 1;
@@ -808,7 +818,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
             Pixel::YUV444P10LE | Pixel::YUV444P12LE | Pixel::YUV444P14LE | Pixel::YUV444P16LE |
             Pixel::YUVA444P10LE | Pixel::YUVA444P12LE | Pixel::YUVA444P16LE |
             Pixel::AYUV64LE | Pixel::GBRAPF32LE | Pixel::GBRPF32LE |
-            Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE => {
+            Pixel::RGB24 | Pixel::RGBA | Pixel::RGB48BE | Pixel::RGBA64BE | Pixel::RGB48LE | Pixel::RGBA64LE => {
                 undistort_frame(input_frame, output_frame)
             },
             _ => {
