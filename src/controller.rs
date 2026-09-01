@@ -1859,6 +1859,10 @@ impl Controller {
                 .collect()
         };
 
+        // Remembered before the fallback below replaces the vector: it is what
+        // tells the two motion sources apart later.
+        let raw_gyro_count = gyro_samples.len();
+
         // Not every camera provides raw gyroscope data. The DJI O4P, for example,
         // reports `contains_raw_gyro: false` and only provides already integrated
         // quaternions. In that case the angular velocity is derived from the
@@ -1898,6 +1902,16 @@ impl Controller {
             return;
         }
 
+        // Whether the motion signal carries real high-frequency content, which is
+        // NOT the same as how densely it is sampled. Gyroflow interpolates
+        // quaternions up to the IMU's nominal rate, so a DJI O4P clip arrives as
+        // ~96000 samples spanning 48s - 2000 Hz by density - while the underlying
+        // orientations come at ~2 Hz. Interpolation cannot create the blade
+        // vibration that is not there, so deciding by sample density picks the
+        // blade-band method for a signal that cannot contain the band, and the
+        // correlator ends up aligning noise (seen as a very low confidence).
+        let derived_from_quats = raw_gyro_count < 2;
+
         let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, res: Option<(f64, f64, bool)>| {
             this.external_audio_syncing = false;
             this.external_audio_syncing_changed();
@@ -1928,13 +1942,17 @@ impl Controller {
         // The STFT runs over the whole track: seconds of work, which would freeze
         // the window if done here.
         std::thread::spawn(move || {
-            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, &params));
+            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &params));
         });
     }
 
     /// Correlates the audio against the motion data. Pure computation, off the UI
     /// thread; returns `(offset_seconds, confidence, used_onset_method)`.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+    ///
+    /// `derived_from_quats` says the motion came from integrated orientations
+    /// rather than a real gyroscope, which decides the method - see the comment
+    /// at `use_onset` below.
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
         use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
         use fpvflow_core::audio::sync::cross_correlate;
 
@@ -1956,7 +1974,13 @@ impl Controller {
         // cases we align by START OF MOVEMENT: the takeoff appears as an energy
         // jump in both the gyro and the audio.
         const MIN_GYRO_RATE_FOR_BLADE_BAND: f64 = 300.0;
-        let use_onset = gyro_rate < MIN_GYRO_RATE_FOR_BLADE_BAND;
+        // `derived_from_quats` alone rules the blade band out, regardless of the
+        // measured rate: those samples are interpolated up to the IMU's nominal
+        // rate (a DJI O4P clip measures ~2000 Hz here while the real
+        // orientations arrive at ~2 Hz), and interpolation cannot put back a
+        // vibration the data never had. Checking only the rate made this case
+        // take the blade band and correlate noise, landing ~2.3s off.
+        let use_onset = derived_from_quats || gyro_rate < MIN_GYRO_RATE_FOR_BLADE_BAND;
 
         let (result, method) = if use_onset {
             use fpvflow_core::audio::features::{audio_energy_envelope, gyro_motion_envelope, onset_strength};
@@ -1985,10 +2009,20 @@ impl Controller {
             (cross_correlate(&audio_env, &gyro_env, env_rate), "blade band")
         };
 
+        // The source is logged next to the rate on purpose: for interpolated
+        // quaternions the two disagree wildly, and printing only the rate is what
+        // hid this bug - the line read "2000 Hz" for a ~2 Hz signal.
         ::log::info!(
-            "Audio auto-sync [{}]: offset={:.3}s, confidence={:.3} (gyro at {:.1} Hz, {} samples)",
-            method, result.offset_seconds, result.confidence, gyro_rate, gyro_samples.len()
+            "Audio auto-sync [{}]: offset={:.3}s, confidence={:.3} ({} at {:.1} Hz, {} samples)",
+            method, result.offset_seconds, result.confidence,
+            if derived_from_quats { "interpolated quaternions" } else { "raw gyro" },
+            gyro_rate, gyro_samples.len()
         );
+        // A weak peak means the correlator found no clear alignment; the offset
+        // is then close to a guess, and the user should check it by hand.
+        if result.confidence < 0.5 {
+            ::log::warn!("Audio auto-sync: low confidence ({:.3}) - verify the offset manually", result.confidence);
+        }
 
         Some((result.offset_seconds, result.confidence as f64, use_onset))
     }
