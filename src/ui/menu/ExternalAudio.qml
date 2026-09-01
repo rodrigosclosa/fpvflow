@@ -251,8 +251,10 @@ MenuItem {
         SliderWithField {
             id: audioOffset;
             width: parent.width;
-            from: -30000;
-            to: 30000;
+            // +/- 60s, not 30: a mic left recording on the bench can start well
+            // over half a minute before the drone takes off and the camera rolls.
+            from: -60000;
+            to: 60000;
             value: 0;
             defaultValue: 0;
             unit: qsTr("ms");

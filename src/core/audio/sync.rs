@@ -129,9 +129,84 @@ pub fn cross_correlate(audio_env: &[f32], gyro_env: &[f32], env_rate_hz: f32) ->
     SyncResult { offset_seconds, confidence }
 }
 
+/// Index of the FIRST sustained rise in `envelope`, or `None` if there is none.
+///
+/// Take-off is the *first* time the propellers spin up, not the loudest moment of
+/// the clip. Looking for the maximum rise fails on real footage: in a recording
+/// made at an event, the crowd and the music produce bigger energy jumps later on,
+/// and on a 185s test clip the largest jump landed at 140.8s while the drone left
+/// the ground at 37s. Taking the first rise above a fraction of the largest one
+/// puts it at 37.05s - the difference between unusable and frame accurate.
+///
+/// `smooth_window` is how many samples are averaged on each side of a candidate.
+/// Wider windows ignore short bursts (a shout, a door) at the cost of blurring the
+/// exact instant; around one second works well.
+///
+/// `threshold_fraction` is measured against the largest rise in this same clip,
+/// not against an absolute level, so it adapts to the microphone gain and to how
+/// far away the drone was.
+pub fn first_sustained_rise(envelope: &[f32], smooth_window: usize, threshold_fraction: f32) -> Option<usize> {
+    let k = smooth_window.max(1);
+    if envelope.len() < k * 2 + 1 {
+        return None;
+    }
+
+    // Rise at each point: how much the average energy grows from the window
+    // before it to the window after it.
+    let rise: Vec<f32> = (0..envelope.len())
+        .map(|i| {
+            if i < k || i + k >= envelope.len() {
+                return 0.0;
+            }
+            let before: f32 = envelope[i - k..i].iter().sum::<f32>() / k as f32;
+            let after: f32 = envelope[i..i + k].iter().sum::<f32>() / k as f32;
+            after - before
+        })
+        .collect();
+
+    let max_rise = rise.iter().cloned().fold(0.0f32, f32::max);
+    if max_rise <= 0.0 {
+        return None;
+    }
+
+    let threshold = max_rise * threshold_fraction.clamp(0.0, 1.0);
+    rise.iter().position(|&v| v >= threshold)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Envelope that rises at `first` and rises much harder later, which is the
+    /// shape that broke the previous "largest rise" logic: quiet, take-off, then
+    /// something louder further in (crowd, music, a low pass).
+    fn two_rises(len: usize, first: usize, second: usize) -> Vec<f32> {
+        (0..len)
+            .map(|i| {
+                if i >= second { 1.0 }
+                else if i >= first { 0.25 }
+                else { 0.05 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn first_rise_wins_over_the_largest_one() {
+        let env = two_rises(600, 200, 400);
+        let found = first_sustained_rise(&env, 20, 0.2).expect("a rise exists");
+        // Near the first step, nowhere near the bigger one at 400.
+        assert!((found as i64 - 200).abs() <= 25, "found {found}, expected ~200");
+    }
+
+    #[test]
+    fn flat_envelope_has_no_rise() {
+        assert_eq!(first_sustained_rise(&vec![0.5; 300], 20, 0.2), None);
+    }
+
+    #[test]
+    fn too_short_for_the_window_is_not_a_crash() {
+        assert_eq!(first_sustained_rise(&[0.1, 0.2, 0.3], 20, 0.2), None);
+    }
 
     /// Synthetic envelope with a gaussian pulse at `center`, imitating what
     /// happens when the propellers spin up: a localized energy increase, which is

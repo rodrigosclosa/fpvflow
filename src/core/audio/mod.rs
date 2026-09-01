@@ -27,6 +27,7 @@ pub mod decode;
 pub mod export;
 pub mod features;
 pub mod sync;
+pub mod takeoff;
 pub mod waveform;
 
 #[cfg(test)]

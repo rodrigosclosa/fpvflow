@@ -56,6 +56,16 @@ pub struct TimelineAudioWaveform {
     /// Peaks computed for the visible area: one (min, max) pair per pixel column.
     peaks: Vec<(f32, f32)>,
 
+    /// Energy envelope per pixel column, normalized to `0.0..=1.0`.
+    ///
+    /// Drawn as a line on top of the waveform because raw amplitude is useless
+    /// for lining up a drone clip: propeller noise is a continuous roar that
+    /// fills the lane evenly, with no visible landmark. The envelope is the RMS
+    /// of the same columns, which turns "the motors spun up here" into a step
+    /// the eye can catch - and it is the same feature the auto-sync correlates,
+    /// so what the user aligns by hand matches what the algorithm looks at.
+    envelope: Vec<f32>,
+
     /// Track duration in seconds, cached to avoid recomputing it on every repaint.
     audio_duration: f64,
 }
@@ -97,6 +107,7 @@ impl TimelineAudioWaveform {
     /// avoids walking the whole file on every frame.
     fn calculate_peaks(&mut self) {
         self.peaks.clear();
+        self.envelope.clear();
 
         let rect = (self as &dyn QQuickItem).bounding_rect();
         if rect.width <= 0.0 || rect.height <= 0.0 || self.durationMs <= 0.0 {
@@ -141,6 +152,7 @@ impl TimelineAudioWaveform {
             // user sees where the audio starts and ends relative to the video.
             if last <= 0.0 || first >= total_frames as f64 {
                 self.peaks.push((0.0, 0.0));
+                self.envelope.push(0.0);
                 continue;
             }
 
@@ -149,17 +161,31 @@ impl TimelineAudioWaveform {
 
             let mut min = f32::MAX;
             let mut max = f32::MIN;
+            let mut sum_sq = 0.0f64;
             let from = first_frame * channels;
             let to = (last_frame * channels).min(track.samples.len());
             for value in &track.samples[from..to] {
                 if *value < min { min = *value; }
                 if *value > max { max = *value; }
+                sum_sq += (*value as f64) * (*value as f64);
             }
+
+            let count = to.saturating_sub(from);
+            self.envelope.push(if count > 0 { (sum_sq / count as f64).sqrt() as f32 } else { 0.0 });
 
             if min > max {
                 self.peaks.push((0.0, 0.0));
             } else {
                 self.peaks.push((min, max));
+            }
+        }
+
+        // Normalized against its own maximum, not against full scale: a mic set
+        // to a low gain would otherwise draw a flat line near zero, hiding the
+        // very step this curve exists to show.
+        if let Some(peak) = self.envelope.iter().cloned().fold(None::<f32>, |m, v| Some(m.map_or(v, |m: f32| m.max(v)))) {
+            if peak > 1e-6 {
+                for v in self.envelope.iter_mut() { *v /= peak; }
             }
         }
     }
@@ -206,5 +232,32 @@ impl QQuickPaintedItem for TimelineAudioWaveform {
             .collect();
 
         p.draw_lines(lines.as_slice());
+
+        // The energy envelope on top, in a brighter tone and mirrored around the
+        // centre line, so it reads as a shape rising out of the waveform rather
+        // than as another series. This is the curve to line up against the gyro
+        // trace above: the takeoff shows here as a step, while the raw waveform
+        // around it is just a uniform block of propeller noise.
+        if self.envelope.len() >= 2 {
+            let env_color = if self.theme == "light" { "#c8641e" } else { "#ffa050" };
+            let mut env_pen = QPen::from_color(QColor::from_name(env_color));
+            env_pen.set_width_f(1.5);
+            p.set_pen(env_pen);
+            p.set_render_hint(QPainterRenderHint::Antialiasing, true);
+
+            let y_of = |v: f32| half_height * (1.0 - (v as f64 * vscale).clamp(0.0, 1.0));
+            let mut env_lines: Vec<QLineF> = Vec::with_capacity((self.envelope.len() - 1) * 2);
+            for (px, pair) in self.envelope.windows(2).enumerate() {
+                let (x0, x1) = (px as f64, px as f64 + 1.0);
+                let (y0, y1) = (y_of(pair[0]), y_of(pair[1]));
+                env_lines.push(QLineF { pt1: QPointF { x: x0, y: y0 }, pt2: QPointF { x: x1, y: y1 } });
+                // Mirrored below the centre.
+                env_lines.push(QLineF {
+                    pt1: QPointF { x: x0, y: rect.height - y0 },
+                    pt2: QPointF { x: x1, y: rect.height - y1 },
+                });
+            }
+            p.draw_lines(env_lines.as_slice());
+        }
     }
 }
