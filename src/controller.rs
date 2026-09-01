@@ -1997,6 +1997,42 @@ impl Controller {
                 return None;
             }
 
+            // First try to match the take-off directly: find when the propellers
+            // spin up in the audio and when the drone starts moving in the gyro,
+            // and the offset is the distance between the two.
+            //
+            // This beats correlating the whole clip whenever the recording has
+            // life around it. Correlation weighs every moment equally, so on a
+            // track with a crowd and music the loudest events dominate and drag
+            // the alignment - on a real 185s clip that put the answer 103s off.
+            // The take-off is a single unambiguous instant that both signals
+            // witness, so pinning it is far more robust than matching shapes.
+            let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
+            let gyro_start = fpvflow_core::audio::sync::first_sustained_rise(&motion, (actual_rate as usize).max(1), 0.20);
+
+            if let (Some(t), Some(g)) = (takeoff, gyro_start) {
+                let gyro_start_s = g as f64 / actual_rate as f64;
+                // `t_audio = t_video + offset`, and both instants are the same
+                // physical event, so the offset is what separates them.
+                let offset = t.time_seconds - gyro_start_s;
+
+                // Sustain is how far the level held past the rise; well above the
+                // threshold means the propellers really are there, so it maps
+                // straight onto how much this offset can be trusted.
+                let confidence = ((t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 2.0)) as f32).clamp(0.0, 1.0);
+
+                ::log::info!(
+                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), gyro at {:.2}s -> offset {:.3}s",
+                    t.time_seconds, t.band_lo_hz, t.sustain, gyro_start_s, offset
+                );
+                return Some((offset, confidence as f64, true));
+            }
+
+            // No clear take-off in one of the two signals: fall back to matching
+            // the overall shapes, which is weaker but always produces something.
+            ::log::info!("Audio auto-sync: no clear take-off (audio: {}, gyro: {}), falling back to correlation",
+                takeoff.is_some(), gyro_start.is_some());
+
             let audio_onset = onset_strength(&audio_energy);
             let gyro_onset = onset_strength(&motion);
 

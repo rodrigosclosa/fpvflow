@@ -380,6 +380,37 @@ Item {
                 vscale: 1.0;
                 durationMs: root.durationMs;
                 opacity: root.trimActive? 0.9 : 1.0;
+
+                // Dragging the lane shifts the audio, which is far quicker than
+                // hunting for the value on a slider: the user pulls the waveform
+                // until it lines up with the gyro trace right above, seeing both
+                // as they move. The slider stays as the way to read and fine-tune
+                // the number.
+                MouseArea {
+                    anchors.fill: parent;
+                    enabled: parent.shown;
+                    cursorShape: Qt.SizeHorCursor;
+                    property real pressX: 0;
+                    property real pressOffset: 0;
+                    onPressed: (mouse) => {
+                        pressX = mouse.x;
+                        pressOffset = audioWaveform.offsetSeconds;
+                    }
+                    onPositionChanged: (mouse) => {
+                        if (!pressed || width <= 0 || root.durationMs <= 0) return;
+                        // Pixels -> seconds through the visible area, so dragging
+                        // keeps up with the timeline zoom.
+                        const visibleSpanS = (root.visibleAreaRight - root.visibleAreaLeft) * root.durationMs / 1000.0;
+                        const deltaS = (mouse.x - pressX) / width * visibleSpanS;
+                        // Dragging right moves the waveform right, which means
+                        // the audio starts later relative to the video: the
+                        // offset goes down.
+                        const panel = window.externalAudio;
+                        if (panel && panel.setOffsetSeconds) {
+                            panel.setOffsetSeconds(pressOffset - deltaS);
+                        }
+                    }
+                }
             }
 
             Loader {

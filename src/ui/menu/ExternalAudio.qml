@@ -82,6 +82,16 @@ MenuItem {
     }
 
     /// Track state stored in the `.gyroflow` file.
+    /// Sets the offset in seconds, clamped to the slider's range.
+    ///
+    /// Exists so the timeline lane can be dragged: writing the slider's value
+    /// runs its `onValueChanged`, so the waveform, the stored value and the
+    /// player all update through the single path they already use.
+    function setOffsetSeconds(seconds: real): void {
+        const ms = Math.max(audioOffset.from, Math.min(audioOffset.to, seconds * 1000.0));
+        audioOffset.value = ms;
+    }
+
     function getSettings(): var {
         const path = controller.get_external_audio_url();
         if (!path) return { };
