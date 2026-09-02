@@ -51,7 +51,7 @@ project format and the [Gyroflow documentation](https://docs.gyroflow.xyz) all s
 > project - open them [here](https://github.com/rodrigosclosa/fpvflow/issues) instead. All credit
 > for the stabilization engine belongs to the Gyroflow authors.
 
-![Screenshot](resources/screenshot.jpg)
+![Screenshot](resources/fpvflow_print.png)
 
 <p align="center">
   <a href="resources/comparison1.mp4"><img src="resources/comparison1.gif" height="200"></a>
@@ -425,6 +425,12 @@ The Gyroflow binary links against mdk-sdk, which is closed-source and not licens
 An additional permission is granted allowing linking with mdk-sdk. mdk-sdk is distributed under its own license.
 
 ## Authors
+
+### FPVFlow
+* [Rodrigo Sclosa](https://github.com/rodrigosclosa/) - *Author of FPVFlow: colour grading with `.cube` LUTs, the external audio track and its automatic synchronization*
+
+### Gyroflow
+FPVFlow builds on Gyroflow, and the stabilization engine is entirely their work.
 
 * [AdrianEddy](https://github.com/AdrianEddy/) - *Author of the Rust implementation (code in this repository), author of the UI, GPU processing, rolling shutter correction, advanced rendering features and the Adobe plugin*
 * [Elvin Chen](https://github.com/ElvinC/) - *Author of the first version in Python, laid the groundwork to make all this possible*
