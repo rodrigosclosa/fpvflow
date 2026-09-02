@@ -119,7 +119,9 @@ pub struct Controller {
     /// when the file is already current for the offset in effect.
     prepare_external_audio_preview: qt_method!(fn(&mut self)),
     /// Url of the aligned file, or empty when it could not be produced.
-    external_audio_preview_ready: qt_signal!(url: QString),
+    /// `rewritten` is true when a new file was just written, which is when the
+    /// player has to pick it up again.
+    external_audio_preview_ready: qt_signal!(url: QString, rewritten: bool),
     /// True while the aligned file is being written.
     external_audio_preparing: qt_property!(bool; NOTIFY external_audio_preparing_changed),
     external_audio_preparing_changed: qt_signal!(),
@@ -1737,6 +1739,8 @@ impl Controller {
                     // pointer to the item across a thread would dangle if the
                     // panel went away mid-decode.
                     this.external_audio = Some(track);
+                    // A new track invalidates the preview file, whatever offset it had.
+                    this.external_audio_preview_offset = None;
                     this.external_audio_changed();
                     this.external_audio_imported(true, pending_offset_ms);
                 }
@@ -1774,6 +1778,7 @@ impl Controller {
             filesystem::stop_accessing_url(&track.path, false);
         }
         self.external_audio = None;
+        self.external_audio_preview_offset = None;
         self.external_audio_changed();
     }
 
@@ -1863,14 +1868,12 @@ impl Controller {
         // tells the two motion sources apart later.
         let raw_gyro_count = gyro_samples.len();
 
-        // The attitude curve itself, resampled onto an even grid. Angular
-        // velocity says how fast the aircraft is turning; this says where it is
-        // pointing, and lift-off shows up here as the orientation starting to
-        // swing away from whatever it held on the ground. On a real clip the
-        // velocity-based search fired at 5.4s for a lift-off at 13s, because a
-        // drone idling on the ground already stirs the gyro - the attitude, by
-        // contrast, stays put until it actually leaves the ground.
-        let (attitude_z, attitude_rate, attitude_start_s) = {
+        // Angular speed of the aircraft on an even 20 Hz grid, in degrees per
+        // second: the rotation between the orientation at each instant and a
+        // quarter of a second later. It is the one quantity that separates the
+        // ground from the air in the orientation data - on the ground it only
+        // drifts (1-2 deg/s on a DJI O4P), in the air it is tens of deg/s.
+        let (angular_speed, speed_rate, speed_start_s) = {
             let gyro = self.stabilizer.gyro.read();
             let quats = &gyro.quaternions;
             if quats.len() >= 2 {
@@ -1878,16 +1881,20 @@ impl Controller {
                 let last_us = *quats.keys().next_back().unwrap() as f64;
                 let span_s = (last_us - first_us) / 1_000_000.0;
                 let rate = 20.0f64;
+                let window_s = 0.25f64;
                 let count = (span_s * rate).round().max(2.0) as usize;
+                // Nearest sample: the source is far denser than the grid, so
+                // interpolating adds nothing here.
+                let at = |t_s: f64| {
+                    let key = (first_us + t_s * 1_000_000.0) as i64;
+                    quats.range(..=key).next_back().or_else(|| quats.range(key..).next()).map(|(_, q)| *q)
+                };
                 let values: Vec<f32> = (0..count)
                     .map(|i| {
-                        let t_us = first_us + (i as f64 + 0.5) / rate * 1_000_000.0;
-                        let key = t_us as i64;
-                        // Nearest sample: the grid is far denser than the source
-                        // quaternions, so interpolating adds nothing here.
-                        match quats.range(..=key).next_back().or_else(|| quats.range(key..).next()) {
-                            Some((_, q)) => q.as_vector()[2] as f32,
-                            None => 0.0,
+                        let t = i as f64 / rate;
+                        match (at(t), at(t + window_s)) {
+                            (Some(a), Some(b)) => ((a.inverse() * b).angle().to_degrees() / window_s) as f32,
+                            _ => 0.0,
                         }
                     })
                     .collect();
@@ -1980,7 +1987,7 @@ impl Controller {
         // The STFT runs over the whole track: seconds of work, which would freeze
         // the window if done here.
         std::thread::spawn(move || {
-            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &attitude_z, attitude_rate, attitude_start_s, &params));
+            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &angular_speed, speed_rate, speed_start_s, &params));
         });
     }
 
@@ -1990,7 +1997,7 @@ impl Controller {
     /// `derived_from_quats` says the motion came from integrated orientations
     /// rather than a real gyroscope, which decides the method - see the comment
     /// at `use_onset` below.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, attitude_z: &[f32], attitude_rate: f32, attitude_start_s: f64, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, angular_speed: &[f32], speed_rate: f32, speed_start_s: f64, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
         use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
         use fpvflow_core::audio::sync::cross_correlate;
 
@@ -2047,24 +2054,18 @@ impl Controller {
             // witness, so pinning it is far more robust than matching shapes.
             let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
 
-            // Lift-off is read from the ATTITUDE curve, not from angular
-            // velocity. A drone idling on the ground already stirs the gyro, so
-            // searching the velocity for a jump fired at 5.4s on a clip that
-            // lifted off at 13s. The orientation, in contrast, holds steady until
-            // the aircraft actually leaves the ground and then swings away - the
-            // Z component of the attitude quaternion is where that reads most
-            // clearly, and it is the curve visible in the timeline chart.
-            let gyro_start = if attitude_z.len() > 40 && attitude_rate > 0.0 {
-                let baseline = (attitude_rate * 3.0) as usize; // 3s of ground
-                let hold = (attitude_rate * 1.0) as usize;     // must last 1s
-                fpvflow_core::audio::sync::first_sustained_move(attitude_z, baseline, 6.0, hold)
-                    .map(|i| (i, attitude_rate))
+            // Lift-off is the first time the angular speed leaves the ground
+            // floor for good; `sync::lift_off` has the rule and what did not
+            // work before it.
+            let gyro_start = if angular_speed.len() > 40 && speed_rate > 0.0 {
+                fpvflow_core::audio::sync::lift_off(angular_speed, speed_rate)
+                    .map(|i| (i, speed_rate))
             } else {
                 None
             };
 
             if let (Some(t), Some((g, g_rate))) = (takeoff, gyro_start) {
-                let gyro_start_s = attitude_start_s + g as f64 / g_rate as f64;
+                let gyro_start_s = speed_start_s + g as f64 / g_rate as f64;
                 // `t_audio = t_video + offset`. Note the two instants are close
                 // but NOT identical: the audio marks the propellers starting,
                 // while the gyro only reacts once the aircraft leaves the ground,
@@ -2079,7 +2080,7 @@ impl Controller {
                 let confidence = ((t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 4.0)) as f32).clamp(0.0, 1.0);
 
                 ::log::info!(
-                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), lift-off (attitude Z) at {:.2}s -> offset {:.3}s",
+                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), lift-off (gyro) at {:.2}s -> offset {:.3}s",
                     t.time_seconds, t.band_lo_hz, t.sustain, gyro_start_s, offset
                 );
                 return Some((offset, confidence as f64, true));
@@ -2138,7 +2139,7 @@ impl Controller {
         if self.external_audio_preparing { return; }
 
         let Some(track) = &self.external_audio else {
-            self.external_audio_preview_ready(QString::default());
+            self.external_audio_preview_ready(QString::default(), false);
             return;
         };
 
@@ -2146,7 +2147,7 @@ impl Controller {
         // the player is showing.
         let duration_s = self.stabilizer.params.read().get_scaled_duration_ms() / 1000.0;
         if duration_s <= 0.0 {
-            self.external_audio_preview_ready(QString::default());
+            self.external_audio_preview_ready(QString::default(), false);
             return;
         }
 
@@ -2160,7 +2161,7 @@ impl Controller {
 
         // Nothing to do when the file on disk already matches the current offset.
         if self.external_audio_preview_offset == Some(track.offset_seconds) && path.exists() {
-            self.external_audio_preview_ready(url);
+            self.external_audio_preview_ready(url, false);
             return;
         }
 
@@ -2172,10 +2173,10 @@ impl Controller {
             this.external_audio_preparing_changed();
             if ok {
                 this.external_audio_preview_offset = Some(offset);
-                this.external_audio_preview_ready(url.clone());
+                this.external_audio_preview_ready(url.clone(), true);
             } else {
                 this.external_audio_preview_offset = None;
-                this.external_audio_preview_ready(QString::default());
+                this.external_audio_preview_ready(QString::default(), false);
             }
         });
 

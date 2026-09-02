@@ -173,185 +173,138 @@ pub fn first_sustained_rise(envelope: &[f32], smooth_window: usize, threshold_fr
     rise.iter().position(|&v| v >= threshold)
 }
 
-/// Index where `values` starts its first sustained move away from where it began,
-/// in either direction, or `None` if it never does.
+/// Index where the aircraft leaves the ground, read from its angular speed in
+/// degrees per second, or `None` if it never does.
 ///
-/// This is the lift-off as the gyroscope sees it. It is deliberately not the same
-/// question as [`first_sustained_rise`]: while the aircraft sits on the ground
-/// with the motors running, orientation barely changes, and the moment it leaves
-/// the ground one component of the attitude quaternion starts to swing. That swing
-/// is what marks the take-off - and it can go either way, so the magnitude of the
-/// change is what matters, not its sign.
+/// On the ground the orientation only drifts: across six real DJI O4P clips the
+/// speed sat at 1-2 deg/s until the take-off, then ramped to 30-50 deg/s within
+/// a second. That floor is what everything is measured against, as a multiple,
+/// so the rule does not depend on the camera's noise level.
 ///
-/// `baseline_window` samples from the start define "where it began" and how much
-/// it wobbles there; the move must exceed that wobble by `sigmas` and hold for
-/// `hold` samples, which is what keeps a bump on the ground from counting.
-pub fn first_sustained_move(values: &[f32], _baseline_window: usize, _sigmas: f32, hold: usize) -> Option<usize> {
-    let n = values.len();
-    let sm = hold.max(2);
-    if n < sm * 3 {
+/// Three things have to be true of the instant reported:
+///
+/// - **It leaves the floor for good.** Throttling up rocks the aircraft on the
+///   ground before it lifts: on the reference clip a bump to 17 deg/s fell
+///   straight back, one second before the real lift-off. A rise that returns
+///   to the floor within [`LIFT_OFF_STAY_S`] is that nudge.
+/// - **It is sustained**, like the audio rule in `takeoff`: the median speed
+///   over the following [`LIFT_OFF_HOLD_S`] stays above the floor.
+/// - **It is the start of the motion**, not the sample that crossed the
+///   threshold: the index walks back to where the speed left the floor.
+///
+/// Earlier versions read one quaternion component as "attitude Z" and looked
+/// for its first drift, its first bend, or the top of its first fall. None of
+/// those is a physical quantity, and all of them fired seconds late on the
+/// reference clip.
+pub fn lift_off(speed: &[f32], rate: f32) -> Option<usize> {
+    let n = speed.len();
+    let stay = (LIFT_OFF_STAY_S * rate) as usize;
+    let hold = (LIFT_OFF_HOLD_S * rate) as usize;
+    if stay == 0 || n < hold.max(stay) {
         return None;
     }
-    let span = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-             - values.iter().cloned().fold(f32::INFINITY, f32::min);
-    if span <= 0.0 {
-        return None;
-    }
-    let mean = |a: usize, b: usize| -> f32 {
-        if b > a { values[a..b].iter().sum::<f32>() / (b - a) as f32 } else { values[a.min(n - 1)] }
+
+    let median = |v: &[f32]| -> f32 {
+        let mut sorted: Vec<f32> = v.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted[sorted.len() / 2]
     };
+    let floor = {
+        let mut sorted: Vec<f32> = speed.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted[n / 10].max(1e-3)
+    };
+    let rise = floor * LIFT_OFF_RISE;
+    let moving = floor * LIFT_OFF_MOVING;
+    let sustained = floor * LIFT_OFF_SUSTAIN;
 
-    // The lift-off is the top of the first descent that DOES NOT COME BACK: the
-    // attitude Z curve stops climbing and stays lower for the rest of the clip.
-    //
-    // Three earlier attempts failed on real data and are not worth repeating.
-    // Requiring a second of confirmed falling reports the middle of the descent
-    // (14.2s for a lift-off at 13s), because the rise decays before it turns.
-    // Measuring slopes against a baseline of the first seconds is fragile - on
-    // `1.MP4` the curve is still settling there, which inflates the threshold
-    // past the real descent. And the steepest drop is not it either: a nudge on
-    // the ground is steeper than the lift-off.
-    for i in sm..n.saturating_sub(sm) {
-        let before = mean(i - sm, i);
-        let after = mean(i, i + sm);
-        let drop = before - after;
-        if drop <= span * 0.05 {
+    for j in 0..n - stay {
+        if speed[j] < rise {
             continue;
         }
-        // It has to stay down: the rest of the clip averages below the level it
-        // came from. A bump returns, a lift-off does not.
-        if mean(i, n) >= before - drop * 0.5 {
+        if speed[j..j + stay].iter().any(|&v| v < moving) {
             continue;
         }
-
-        // The top of the descent, which is the instant the aircraft leaves the
-        // ground.
-        let lo = i.saturating_sub(sm);
-        let mut top = lo;
-        for k in lo..=i {
-            if values[k] >= values[top] {
-                top = k;
-            }
-        }
-
-        // Guard against a narrow spike: compare with the level before the TOP,
-        // not before `i`. Further along, a window anchored at `i` already covers
-        // the spike itself and the test would pass on a curve that only rose and
-        // came back.
-        let prior = if top >= sm {
-            mean(top.saturating_sub(sm * 2), top.saturating_sub(sm / 2))
-        } else {
-            values[0]
-        };
-        if mean(i, n) >= prior - span * 0.05 {
+        if median(&speed[j..(j + hold).min(n)]) < sustained {
             continue;
         }
-        return Some(top);
+        let mut k = j;
+        while k > 0 && speed[k - 1] >= moving {
+            k -= 1;
+        }
+        return Some(k);
     }
     None
 }
+
+/// Seconds the speed must stay off the ground floor for a rise to count.
+pub const LIFT_OFF_STAY_S: f32 = 2.0;
+/// Seconds over which the speed must remain elevated, as a median.
+pub const LIFT_OFF_HOLD_S: f32 = 5.0;
+/// Multiples of the ground floor that count as a rise, as still moving, and as
+/// sustained flight. Ground drift is ~1 deg/s and flight is tens, so all three
+/// sit well inside the gap.
+const LIFT_OFF_RISE: f32 = 4.0;
+const LIFT_OFF_MOVING: f32 = 2.0;
+const LIFT_OFF_SUSTAIN: f32 = 3.0;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_drift_away_from_the_baseline_is_found() {
-        // Flat, then a ramp down - the shape of the attitude curve when the
-        // aircraft lifts off.
-        let mut v = vec![0.7f32; 200];
-        for i in 200..400 {
-            v.push(0.7 - (i - 200) as f32 * 0.002);
-        }
-        let found = first_sustained_move(&v, 100, 6.0, 20).expect("the move exists");
-        assert!((found as i64 - 200).abs() <= 30, "found {found}, expected ~200");
-    }
-
-    /// A rise is NOT a lift-off. The attitude Z curve falls when the aircraft
-    /// leaves the ground, and on a real clip it climbs gently the whole time the
-    /// drone waits armed - counting that climb fired ~1.5s early.
-    #[test]
-    fn a_move_upwards_is_not_a_lift_off() {
-        let mut v = vec![0.2f32; 200];
-        for i in 200..400 {
-            v.push(0.2 + (i - 200) as f32 * 0.002);
-        }
-        assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
-    }
-
-    #[test]
-    fn a_steady_signal_never_moves() {
-        assert_eq!(first_sustained_move(&vec![0.5; 400], 100, 6.0, 20), None);
-    }
-
-    /// The case that broke the displacement-based version: the attitude already
-    /// drifts slowly while the aircraft waits on the ground, and only turns
-    /// sharply at lift-off. Measuring distance from a baseline fired during the
-    /// drift; measuring slope has to wait for the bend.
-    #[test]
-    fn a_slow_drift_before_the_turn_is_not_the_lift_off() {
-        let mut v = Vec::new();
-        // 300 samples drifting gently, then a much steeper fall.
-        for i in 0..300 { v.push(0.68 - i as f32 * 0.00005); }
-        let last = *v.last().unwrap();
-        for i in 0..200 { v.push(last - i as f32 * 0.002); }
-        let found = first_sustained_move(&v, 100, 6.0, 20).expect("the bend exists");
-        assert!(found >= 260, "found {found}, expected the bend near 300, not the drift before it");
-    }
-
-    /// A brief bump - the aircraft nudged on the ground - is not a lift-off,
-    /// because the value comes straight back.
-    #[test]
-    fn a_brief_bump_is_not_a_move() {
-        let mut v = vec![0.5f32; 400];
-        for i in 200..205 { v[i] = 0.9; }
-        assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
-    }
-
-    /// The curve actually measured in `1.MP4`, sample by sample from the log,
-    /// resampled to 20 Hz. It climbs while the drone sits armed, peaks at ~13s
-    /// and then falls away as it lifts. Detecting only the confirmed fall
-    /// reported 14.2s - the middle of the descent, ~1.2s late.
-    #[test]
-    fn the_real_clip_finds_the_top_not_the_middle_of_the_fall() {
-        // (t, Z) straight from the telemetry of 1.MP4.
-        const MEASURED: &[(f32, f32)] = &[
-            (2.046, 0.68241676), (2.552, 0.68222812), (3.563, 0.68210879),
-            (4.574, 0.68207606), (5.585, 0.68212928), (6.596, 0.68225450),
-            (7.607, 0.68242942), (8.618, 0.68262786), (9.629, 0.68282149),
-            (10.640, 0.68298126), (11.652, 0.68308011), (12.663, 0.68309883),
-            (13.674, 0.68303193), (14.685, 0.68289300), (15.696, 0.68271299),
-            (16.707, 0.68253334), (17.718, 0.68239435),
-        ];
-        let rate = 20.0f32;
-        let start = MEASURED[0].0;
-        let end = MEASURED[MEASURED.len() - 1].0;
-        // Nearest-sample resampling, exactly what the controller does.
-        let count = ((end - start) * rate) as usize;
-        let v: Vec<f32> = (0..count)
+    /// Angular speed of a clip at 20 Hz: `floor` on the ground, `flight` from
+    /// `lift_off` on, with an optional half-second nudge that returns to the
+    /// ground.
+    fn flight(len: usize, floor: f32, lift_off: usize, flight: f32, nudge: Option<usize>) -> Vec<f32> {
+        (0..len)
             .map(|i| {
-                let t = start + i as f32 / rate;
-                MEASURED.iter().rev().find(|(mt, _)| *mt <= t).unwrap_or(&MEASURED[0]).1
+                let mut v = floor + if i % 2 == 0 { 0.1 } else { -0.1 };
+                if i >= lift_off {
+                    v = flight;
+                }
+                if let Some(n) = nudge {
+                    if i >= n && i < n + 10 {
+                        v = flight * 0.4;
+                    }
+                }
+                v
             })
-            .collect();
-
-        // The log only prints the first ~16s, which is not enough for the search
-        // window; the descent continues at the rate measured at the end.
-        let mut v = v;
-        let tail_slope = (MEASURED[16].1 - MEASURED[15].1) / (1.011 * rate);
-        let last = *v.last().unwrap();
-        for i in 1..(10.0 * rate) as usize {
-            v.push(last + i as f32 * tail_slope);
-        }
-
-        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the turn exists");
-        let seconds = start + found as f32 / rate;
-        assert!(
-            (seconds - 13.0).abs() <= 1.2,
-            "found {seconds:.2}s, expected the top near 13s, not the middle of the fall"
-        );
+            .collect()
     }
 
+    #[test]
+    fn lift_off_is_where_the_speed_leaves_the_ground() {
+        let speed = flight(1200, 1.0, 400, 40.0, None);
+        assert_eq!(lift_off(&speed, 20.0), Some(400));
+    }
+
+    /// The reference clip: the aircraft rocks on the ground a second before it
+    /// actually leaves. That bump falls straight back and must be skipped.
+    #[test]
+    fn a_nudge_that_returns_to_the_ground_is_not_the_lift_off() {
+        let speed = flight(1200, 1.0, 400, 40.0, Some(370));
+        assert_eq!(lift_off(&speed, 20.0), Some(400));
+    }
+
+    #[test]
+    fn a_grounded_clip_has_no_lift_off() {
+        assert_eq!(lift_off(&flight(1200, 1.0, usize::MAX, 40.0, None), 20.0), None);
+        assert_eq!(lift_off(&flight(1200, 1.0, usize::MAX, 40.0, Some(370)), 20.0), None);
+    }
+
+    /// The thresholds are multiples of the clip's own floor, so a camera with
+    /// more drift is read the same way.
+    #[test]
+    fn a_noisier_camera_is_measured_against_its_own_floor() {
+        let speed = flight(1200, 5.0, 400, 60.0, Some(370));
+        assert_eq!(lift_off(&speed, 20.0), Some(400));
+    }
+
+    #[test]
+    fn too_short_for_a_lift_off_is_not_a_crash() {
+        assert_eq!(lift_off(&[1.0, 40.0, 40.0], 20.0), None);
+        assert_eq!(lift_off(&[], 20.0), None);
+    }
     /// Envelope that rises at `first` and rises much harder later, which is the
     /// shape that broke the previous "largest rise" logic: quiet, take-off, then
     /// something louder further in (crowd, music, a low pass).

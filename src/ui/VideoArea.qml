@@ -342,7 +342,7 @@ Item {
 
     Connections {
         target: controller;
-        function onExternal_audio_preview_ready(url: string): void {
+        function onExternal_audio_preview_ready(url: string, rewritten: bool): void {
             if (!url) { vid.play(); return; }
 
             // MDK only demuxes an external track during prepare(), so the track
@@ -350,11 +350,17 @@ Item {
             // sequence that works - setMedia(), track, prepare(). Attaching it
             // to the loaded player leaves it registered but never opened, and
             // re-preparing in place drops the playback range and locks the UI.
-            if (root.attachedAudioUrl !== url) {
+            //
+            // The player is reloaded directly, not through controller.load_video():
+            // that one clears the whole project (gyro, sync, trim) for a new
+            // file, and this is the same file with a track attached. The
+            // metadata handlers below know to leave the project alone.
+            if (rewritten || root.attachedAudioUrl !== url) {
                 root.pendingAudioSeek = vid.timestamp;
+                root.audioReload = true;
                 root.attachedAudioUrl = url;
                 vid.stageExternalAudio(url, 0.0);
-                controller.load_video(controller.get_input_file_url(), vid);
+                vid.setUrl(vid.url, "");
                 return;
             }
             vid.play();
@@ -364,10 +370,14 @@ Item {
     /// Preview file currently attached to the player, to avoid reloading the
     /// video when the track has not actually changed.
     property string attachedAudioUrl: "";
+    /// True while the player reloads the same file to attach the audio track.
+    property bool audioReload: false;
     /// Playhead to restore after a reload that attached the audio track, or -1.
     property real pendingAudioSeek: -1;
 
     function loadFile(url: url, skip_detection: bool, queueJobId: int): void {
+        root.attachedAudioUrl = "";
+        root.audioReload = false;
         let filename = filesystem.get_filename(url);
         let folder = filesystem.get_folder(url);
 
@@ -740,6 +750,9 @@ Item {
                         updateTurnSpeed();
                     }
                     onMetadataLoaded: (md) => {
+                        // Same file, reloaded for the audio track: not a new
+                        // file, so the project must not be reset.
+                        if (root.audioReload) { root.audioReload = false; return; }
                         Qt.callLater(fileLoaded, md);
                     }
                     function fileLoaded(md: var): void {
@@ -790,6 +803,13 @@ Item {
                                 const position = root.pendingAudioSeek;
                                 root.pendingAudioSeek = -1;
                                 Qt.callLater(function() {
+                                    // The new player starts with default
+                                    // volume and no range.
+                                    vid.volume = volumeSlider.value / 100.0;
+                                    if (timeline.restrictTrim) {
+                                        const ranges = timeline.getTrimRanges();
+                                        vid.setPlaybackRange(ranges[0][0] * vid.duration, ranges[ranges.length - 1][1] * vid.duration);
+                                    }
                                     vid.seekToTimestamp(position, true);
                                     vid.play();
                                 });
