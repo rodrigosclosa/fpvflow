@@ -173,9 +173,76 @@ pub fn first_sustained_rise(envelope: &[f32], smooth_window: usize, threshold_fr
     rise.iter().position(|&v| v >= threshold)
 }
 
+/// Index where `values` starts its first sustained move away from where it began,
+/// in either direction, or `None` if it never does.
+///
+/// This is the lift-off as the gyroscope sees it. It is deliberately not the same
+/// question as [`first_sustained_rise`]: while the aircraft sits on the ground
+/// with the motors running, orientation barely changes, and the moment it leaves
+/// the ground one component of the attitude quaternion starts to swing. That swing
+/// is what marks the take-off - and it can go either way, so the magnitude of the
+/// change is what matters, not its sign.
+///
+/// `baseline_window` samples from the start define "where it began" and how much
+/// it wobbles there; the move must exceed that wobble by `sigmas` and hold for
+/// `hold` samples, which is what keeps a bump on the ground from counting.
+pub fn first_sustained_move(values: &[f32], baseline_window: usize, sigmas: f32, hold: usize) -> Option<usize> {
+    let w = baseline_window.min(values.len() / 4).max(2);
+    if values.len() < w * 2 + hold {
+        return None;
+    }
+
+    let base: f32 = values[..w].iter().sum::<f32>() / w as f32;
+    let variance: f32 = values[..w].iter().map(|v| (v - base) * (v - base)).sum::<f32>() / w as f32;
+    let deviation = variance.sqrt();
+
+    // A floor on the noise estimate: a perfectly still baseline would otherwise
+    // make any float wobble look significant.
+    let threshold = (deviation * sigmas).max(1e-4);
+
+    (w..values.len() - hold).find(|&i| {
+        values[i..i + hold].iter().all(|v| (v - base).abs() >= threshold)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_drift_away_from_the_baseline_is_found() {
+        // Flat, then a ramp down - the shape of the attitude curve when the
+        // aircraft lifts off.
+        let mut v = vec![0.7f32; 200];
+        for i in 200..400 {
+            v.push(0.7 - (i - 200) as f32 * 0.002);
+        }
+        let found = first_sustained_move(&v, 100, 6.0, 20).expect("the move exists");
+        assert!((found as i64 - 200).abs() <= 30, "found {found}, expected ~200");
+    }
+
+    #[test]
+    fn a_move_upwards_counts_the_same() {
+        let mut v = vec![0.2f32; 200];
+        for i in 200..400 {
+            v.push(0.2 + (i - 200) as f32 * 0.002);
+        }
+        assert!(first_sustained_move(&v, 100, 6.0, 20).is_some());
+    }
+
+    #[test]
+    fn a_steady_signal_never_moves() {
+        assert_eq!(first_sustained_move(&vec![0.5; 400], 100, 6.0, 20), None);
+    }
+
+    /// A brief bump - the aircraft nudged on the ground - is not a lift-off,
+    /// because the value comes straight back.
+    #[test]
+    fn a_brief_bump_is_not_a_move() {
+        let mut v = vec![0.5f32; 400];
+        for i in 200..205 { v[i] = 0.9; }
+        assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
+    }
 
     /// Envelope that rises at `first` and rises much harder later, which is the
     /// shape that broke the previous "largest rise" logic: quiet, take-off, then

@@ -1863,6 +1863,40 @@ impl Controller {
         // tells the two motion sources apart later.
         let raw_gyro_count = gyro_samples.len();
 
+        // The attitude curve itself, resampled onto an even grid. Angular
+        // velocity says how fast the aircraft is turning; this says where it is
+        // pointing, and lift-off shows up here as the orientation starting to
+        // swing away from whatever it held on the ground. On a real clip the
+        // velocity-based search fired at 5.4s for a lift-off at 13s, because a
+        // drone idling on the ground already stirs the gyro - the attitude, by
+        // contrast, stays put until it actually leaves the ground.
+        let (attitude_z, attitude_rate) = {
+            let gyro = self.stabilizer.gyro.read();
+            let quats = &gyro.quaternions;
+            if quats.len() >= 2 {
+                let first_us = *quats.keys().next().unwrap() as f64;
+                let last_us = *quats.keys().next_back().unwrap() as f64;
+                let span_s = (last_us - first_us) / 1_000_000.0;
+                let rate = 20.0f64;
+                let count = (span_s * rate).round().max(2.0) as usize;
+                let values: Vec<f32> = (0..count)
+                    .map(|i| {
+                        let t_us = first_us + (i as f64 + 0.5) / rate * 1_000_000.0;
+                        let key = t_us as i64;
+                        // Nearest sample: the grid is far denser than the source
+                        // quaternions, so interpolating adds nothing here.
+                        match quats.range(..=key).next_back().or_else(|| quats.range(key..).next()) {
+                            Some((_, q)) => q.as_vector()[2] as f32,
+                            None => 0.0,
+                        }
+                    })
+                    .collect();
+                (values, rate as f32)
+            } else {
+                (Vec::new(), 0.0)
+            }
+        };
+
         // Not every camera provides raw gyroscope data. The DJI O4P, for example,
         // reports `contains_raw_gyro: false` and only provides already integrated
         // quaternions. In that case the angular velocity is derived from the
@@ -1942,7 +1976,7 @@ impl Controller {
         // The STFT runs over the whole track: seconds of work, which would freeze
         // the window if done here.
         std::thread::spawn(move || {
-            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &params));
+            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &attitude_z, attitude_rate, &params));
         });
     }
 
@@ -1952,7 +1986,7 @@ impl Controller {
     /// `derived_from_quats` says the motion came from integrated orientations
     /// rather than a real gyroscope, which decides the method - see the comment
     /// at `use_onset` below.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, attitude_z: &[f32], attitude_rate: f32, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
         use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
         use fpvflow_core::audio::sync::cross_correlate;
 
@@ -2008,21 +2042,40 @@ impl Controller {
             // The take-off is a single unambiguous instant that both signals
             // witness, so pinning it is far more robust than matching shapes.
             let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
-            let gyro_start = fpvflow_core::audio::sync::first_sustained_rise(&motion, (actual_rate as usize).max(1), 0.20);
 
-            if let (Some(t), Some(g)) = (takeoff, gyro_start) {
-                let gyro_start_s = g as f64 / actual_rate as f64;
-                // `t_audio = t_video + offset`, and both instants are the same
-                // physical event, so the offset is what separates them.
+            // Lift-off is read from the ATTITUDE curve, not from angular
+            // velocity. A drone idling on the ground already stirs the gyro, so
+            // searching the velocity for a jump fired at 5.4s on a clip that
+            // lifted off at 13s. The orientation, in contrast, holds steady until
+            // the aircraft actually leaves the ground and then swings away - the
+            // Z component of the attitude quaternion is where that reads most
+            // clearly, and it is the curve visible in the timeline chart.
+            let gyro_start = if attitude_z.len() > 40 && attitude_rate > 0.0 {
+                let baseline = (attitude_rate * 3.0) as usize; // 3s of ground
+                let hold = (attitude_rate * 1.0) as usize;     // must last 1s
+                fpvflow_core::audio::sync::first_sustained_move(attitude_z, baseline, 6.0, hold)
+                    .map(|i| (i, attitude_rate))
+            } else {
+                None
+            };
+
+            if let (Some(t), Some((g, g_rate))) = (takeoff, gyro_start) {
+                let gyro_start_s = g as f64 / g_rate as f64;
+                // `t_audio = t_video + offset`. Note the two instants are close
+                // but NOT identical: the audio marks the propellers starting,
+                // while the gyro only reacts once the aircraft leaves the ground,
+                // which can be seconds later. The result is therefore a good
+                // starting point rather than a final answer, and the confidence
+                // below is deliberately capped to say so.
                 let offset = t.time_seconds - gyro_start_s;
 
-                // Sustain is how far the level held past the rise; well above the
-                // threshold means the propellers really are there, so it maps
-                // straight onto how much this offset can be trusted.
-                let confidence = ((t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 2.0)) as f32).clamp(0.0, 1.0);
+                // Halved on purpose: the audio side is accurate to a fraction of
+                // a second, but the pairing above is approximate, so reporting
+                // high confidence here would overstate what this offset is worth.
+                let confidence = ((t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 4.0)) as f32).clamp(0.0, 1.0);
 
                 ::log::info!(
-                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), gyro at {:.2}s -> offset {:.3}s",
+                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), lift-off (attitude Z) at {:.2}s -> offset {:.3}s",
                     t.time_seconds, t.band_lo_hz, t.sustain, gyro_start_s, offset
                 );
                 return Some((offset, confidence as f64, true));
@@ -2030,7 +2083,7 @@ impl Controller {
 
             // No clear take-off in one of the two signals: fall back to matching
             // the overall shapes, which is weaker but always produces something.
-            ::log::info!("Audio auto-sync: no clear take-off (audio: {}, gyro: {}), falling back to correlation",
+            ::log::info!("Audio auto-sync: no clear take-off (audio: {}, lift-off: {}), falling back to correlation",
                 takeoff.is_some(), gyro_start.is_some());
 
             let audio_onset = onset_strength(&audio_energy);
