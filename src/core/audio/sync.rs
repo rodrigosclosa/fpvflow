@@ -186,38 +186,69 @@ pub fn first_sustained_rise(envelope: &[f32], smooth_window: usize, threshold_fr
 /// `baseline_window` samples from the start define "where it began" and how much
 /// it wobbles there; the move must exceed that wobble by `sigmas` and hold for
 /// `hold` samples, which is what keeps a bump on the ground from counting.
-pub fn first_sustained_move(values: &[f32], baseline_window: usize, sigmas: f32, hold: usize) -> Option<usize> {
-    let w = baseline_window.min(values.len() / 4).max(2);
-    if values.len() < w * 2 + hold {
+pub fn first_sustained_move(values: &[f32], _baseline_window: usize, _sigmas: f32, hold: usize) -> Option<usize> {
+    let n = values.len();
+    let sm = hold.max(2);
+    if n < sm * 3 {
         return None;
     }
-
-    // The lift-off has a DIRECTION: the attitude Z curve falls when the aircraft
-    // leaves the ground. It does not merely change - on a real clip it climbs
-    // gently for the whole time the drone sits armed on the ground (0.68242 ->
-    // 0.68310 over 11s) and only turns downwards at the moment it lifts. Looking
-    // at the magnitude of the slope caught that climb and fired ~1.5s early, so
-    // only a sustained FALL counts here.
-    let slope_at = |i: usize| -> f32 {
-        if i + hold >= values.len() { return 0.0; }
-        (values[i + hold] - values[i]) / hold as f32
+    let span = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+             - values.iter().cloned().fold(f32::INFINITY, f32::min);
+    if span <= 0.0 {
+        return None;
+    }
+    let mean = |a: usize, b: usize| -> f32 {
+        if b > a { values[a..b].iter().sum::<f32>() / (b - a) as f32 } else { values[a.min(n - 1)] }
     };
 
-    // The baseline measures how much the curve wanders while still on the
-    // ground, so the threshold adapts to each clip instead of being a constant.
-    let baseline_slopes: Vec<f32> = (0..w).map(slope_at).collect();
-    let mean: f32 = baseline_slopes.iter().sum::<f32>() / baseline_slopes.len() as f32;
-    let variance: f32 = baseline_slopes.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / baseline_slopes.len() as f32;
+    // The lift-off is the top of the first descent that DOES NOT COME BACK: the
+    // attitude Z curve stops climbing and stays lower for the rest of the clip.
+    //
+    // Three earlier attempts failed on real data and are not worth repeating.
+    // Requiring a second of confirmed falling reports the middle of the descent
+    // (14.2s for a lift-off at 13s), because the rise decays before it turns.
+    // Measuring slopes against a baseline of the first seconds is fragile - on
+    // `1.MP4` the curve is still settling there, which inflates the threshold
+    // past the real descent. And the steepest drop is not it either: a nudge on
+    // the ground is steeper than the lift-off.
+    for i in sm..n.saturating_sub(sm) {
+        let before = mean(i - sm, i);
+        let after = mean(i, i + sm);
+        let drop = before - after;
+        if drop <= span * 0.05 {
+            continue;
+        }
+        // It has to stay down: the rest of the clip averages below the level it
+        // came from. A bump returns, a lift-off does not.
+        if mean(i, n) >= before - drop * 0.5 {
+            continue;
+        }
 
-    // A floor on the noise estimate: a perfectly steady baseline would otherwise
-    // make any float wobble look significant.
-    let threshold = (variance.sqrt() * sigmas).max(1e-6);
+        // The top of the descent, which is the instant the aircraft leaves the
+        // ground.
+        let lo = i.saturating_sub(sm);
+        let mut top = lo;
+        for k in lo..=i {
+            if values[k] >= values[top] {
+                top = k;
+            }
+        }
 
-    // Sustained and downwards, so neither a single jittery sample nor the slow
-    // climb before the take-off can trigger it.
-    (w..values.len().saturating_sub(hold * 2)).find(|&i| {
-        (i..i + hold).all(|j| slope_at(j) - mean <= -threshold)
-    })
+        // Guard against a narrow spike: compare with the level before the TOP,
+        // not before `i`. Further along, a window anchored at `i` already covers
+        // the spike itself and the test would pass on a curve that only rose and
+        // came back.
+        let prior = if top >= sm {
+            mean(top.saturating_sub(sm * 2), top.saturating_sub(sm / 2))
+        } else {
+            values[0]
+        };
+        if mean(i, n) >= prior - span * 0.05 {
+            continue;
+        }
+        return Some(top);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -277,30 +308,47 @@ mod tests {
         assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
     }
 
-    /// The shape actually measured in `1.MP4`: the attitude Z climbs gently
-    /// while the drone sits armed on the ground (0.68242 -> 0.68310 across 11s)
-    /// and only turns downwards when it lifts, around 13s. Parameters are the
-    /// ones the controller passes: 20 Hz, a 3s baseline and a 1s hold.
+    /// The curve actually measured in `1.MP4`, sample by sample from the log,
+    /// resampled to 20 Hz. It climbs while the drone sits armed, peaks at ~13s
+    /// and then falls away as it lifts. Detecting only the confirmed fall
+    /// reported 14.2s - the middle of the descent, ~1.2s late.
     #[test]
-    fn the_real_clip_finds_the_fall_not_the_climb_before_it() {
+    fn the_real_clip_finds_the_top_not_the_middle_of_the_fall() {
+        // (t, Z) straight from the telemetry of 1.MP4.
+        const MEASURED: &[(f32, f32)] = &[
+            (2.046, 0.68241676), (2.552, 0.68222812), (3.563, 0.68210879),
+            (4.574, 0.68207606), (5.585, 0.68212928), (6.596, 0.68225450),
+            (7.607, 0.68242942), (8.618, 0.68262786), (9.629, 0.68282149),
+            (10.640, 0.68298126), (11.652, 0.68308011), (12.663, 0.68309883),
+            (13.674, 0.68303193), (14.685, 0.68289300), (15.696, 0.68271299),
+            (16.707, 0.68253334), (17.718, 0.68239435),
+        ];
         let rate = 20.0f32;
-        let mut v = Vec::new();
-        let lift = (13.0 * rate) as usize;
-        // The climb, with the sensor wobble the real curve carries.
-        for i in 0..lift {
-            let wobble = ((i as f32) * 0.7).sin() * 0.000004;
-            v.push(0.68242 + i as f32 * 0.0000026 + wobble);
-        }
-        // Then it falls away as the aircraft leaves the ground.
+        let start = MEASURED[0].0;
+        let end = MEASURED[MEASURED.len() - 1].0;
+        // Nearest-sample resampling, exactly what the controller does.
+        let count = ((end - start) * rate) as usize;
+        let v: Vec<f32> = (0..count)
+            .map(|i| {
+                let t = start + i as f32 / rate;
+                MEASURED.iter().rev().find(|(mt, _)| *mt <= t).unwrap_or(&MEASURED[0]).1
+            })
+            .collect();
+
+        // The log only prints the first ~16s, which is not enough for the search
+        // window; the descent continues at the rate measured at the end.
+        let mut v = v;
+        let tail_slope = (MEASURED[16].1 - MEASURED[15].1) / (1.011 * rate);
         let last = *v.last().unwrap();
-        for i in 0..(10.0 * rate) as usize {
-            v.push(last - i as f32 * 0.00012);
+        for i in 1..(10.0 * rate) as usize {
+            v.push(last + i as f32 * tail_slope);
         }
-        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the fall exists");
-        let seconds = found as f32 / rate;
+
+        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the turn exists");
+        let seconds = start + found as f32 / rate;
         assert!(
-            (seconds - 13.0).abs() <= 1.5,
-            "found {seconds:.2}s, expected the fall near 13s (the climb before it is not the lift-off)"
+            (seconds - 13.0).abs() <= 1.2,
+            "found {seconds:.2}s, expected the top near 13s, not the middle of the fall"
         );
     }
 

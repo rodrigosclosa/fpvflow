@@ -12,8 +12,10 @@ Item {
     Shortcut {
         sequences: ["Space", "F3"];
         onActivated: {
+            // playWithExternalAudio(), not play(): the external track has to
+            // be attached before playback, or the preview runs silent.
             if (videoArea.vid.playing) videoArea.vid.pause();
-            else                       videoArea.vid.play();
+            else                       videoArea.playWithExternalAudio();
         }
     }
     // Previous frame
@@ -266,7 +268,7 @@ Item {
             videoArea.vid.playbackRate = 1;
             j.currentX = l.currentX = 0;
             if (videoArea.vid.playing) videoArea.vid.pause();
-            else                       videoArea.vid.play();
+            else                       videoArea.playWithExternalAudio();
         }
     }
     // Play forward
