@@ -198,7 +198,20 @@ fn first_rise_with_sustain(envelope: &[f32]) -> Option<(usize, f32)> {
     let level_after = median(&envelope[index..after_to.max(index + 1)]);
 
     let sustain = if level_before > 1e-6 { level_after / level_before } else { 0.0 };
-    Some((index, sustain))
+
+    // `index` is where the one-second window ahead first looks louder than the
+    // one behind, which is up to half a second BEFORE the sound actually rises.
+    // The onset is where the level itself crosses 30% of that rise; three
+    // samples together so a stray click does not count. On the real recordings
+    // this moved the detections 0-0.45s later, within 0.3s of what a listener
+    // picks; crossing halfway to the ten-second median instead overshot by up
+    // to a second, because the level keeps climbing after the lift-off.
+    let after: f32 = envelope[index..index + k].iter().sum::<f32>() / k as f32;
+    let target = level_before + (after - level_before) * 0.3;
+    let onset = (index..(index + k).min(envelope.len() - 2))
+        .find(|&i| envelope[i..i + 3].iter().sum::<f32>() / 3.0 >= target)
+        .unwrap_or(index);
+    Some((onset, sustain))
 }
 
 fn median(values: &[f32]) -> f32 {
