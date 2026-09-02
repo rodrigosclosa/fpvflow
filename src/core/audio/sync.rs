@@ -192,16 +192,33 @@ pub fn first_sustained_move(values: &[f32], baseline_window: usize, sigmas: f32,
         return None;
     }
 
-    let base: f32 = values[..w].iter().sum::<f32>() / w as f32;
-    let variance: f32 = values[..w].iter().map(|v| (v - base) * (v - base)).sum::<f32>() / w as f32;
-    let deviation = variance.sqrt();
+    // The SLOPE, not the distance from where it started. An aircraft waiting on
+    // the ground rarely holds a perfectly constant attitude - it settles, the
+    // ground is not level, the operator nudges it - so the curve drifts slowly
+    // the whole time. Measuring displacement from a baseline picks up that drift
+    // and fires early: on a real clip it reported 6.5s for a lift-off at 13s.
+    // What actually marks the moment is the curve turning sharply, which is a
+    // change in slope regardless of how far it has already wandered.
+    let slope_at = |i: usize| -> f32 {
+        if i < hold || i + hold >= values.len() { return 0.0; }
+        (values[i + hold] - values[i]) / hold as f32
+    };
 
-    // A floor on the noise estimate: a perfectly still baseline would otherwise
+    let baseline_slopes: Vec<f32> = (hold..w).map(slope_at).collect();
+    if baseline_slopes.is_empty() {
+        return None;
+    }
+    let mean: f32 = baseline_slopes.iter().sum::<f32>() / baseline_slopes.len() as f32;
+    let variance: f32 = baseline_slopes.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / baseline_slopes.len() as f32;
+
+    // A floor on the noise estimate: a perfectly steady baseline would otherwise
     // make any float wobble look significant.
-    let threshold = (deviation * sigmas).max(1e-4);
+    let threshold = (variance.sqrt() * sigmas).max(1e-6);
 
-    (w..values.len() - hold).find(|&i| {
-        values[i..i + hold].iter().all(|v| (v - base).abs() >= threshold)
+    // Sustained, so a single jittery sample cannot trigger it: the steeper slope
+    // has to hold across the whole window.
+    (w..values.len().saturating_sub(hold * 2)).find(|&i| {
+        (i..i + hold).all(|j| (slope_at(j) - mean).abs() >= threshold)
     })
 }
 
@@ -233,6 +250,21 @@ mod tests {
     #[test]
     fn a_steady_signal_never_moves() {
         assert_eq!(first_sustained_move(&vec![0.5; 400], 100, 6.0, 20), None);
+    }
+
+    /// The case that broke the displacement-based version: the attitude already
+    /// drifts slowly while the aircraft waits on the ground, and only turns
+    /// sharply at lift-off. Measuring distance from a baseline fired during the
+    /// drift; measuring slope has to wait for the bend.
+    #[test]
+    fn a_slow_drift_before_the_turn_is_not_the_lift_off() {
+        let mut v = Vec::new();
+        // 300 samples drifting gently, then a much steeper fall.
+        for i in 0..300 { v.push(0.68 - i as f32 * 0.00005); }
+        let last = *v.last().unwrap();
+        for i in 0..200 { v.push(last - i as f32 * 0.002); }
+        let found = first_sustained_move(&v, 100, 6.0, 20).expect("the bend exists");
+        assert!(found >= 260, "found {found}, expected the bend near 300, not the drift before it");
     }
 
     /// A brief bump - the aircraft nudged on the ground - is not a lift-off,
