@@ -15,6 +15,8 @@ MenuItem {
 
     property alias hasQuaternions: integrator.hasQuaternions;
     property bool hasAccurateTimestamps: false;
+    property bool hasFocusDistance: false;
+    property bool hasIris: false;
     property alias hasRawGyro: integrator.hasRawGyro;
     property alias integrationMethod: integrator.currentIndex;
     property alias orientationIndicator: orientationIndicator;
@@ -25,7 +27,7 @@ MenuItem {
 
     FileDialog {
         id: fileDialog;
-        property var extensions: [ "csv", "txt", "bbl", "bfl", "mp4", "mov", "mxf", "insv", "gcsv", "360", "log", "bin", "braw", "r3d", "nev", "gpmf", "crm" ];
+        property var extensions: [ "csv", "txt", "bbl", "bfl", "mp4", "mov", "mxf", "insv", "gcsv", "360", "log", "bin", "braw", "r3d", "nev", "gpmf", "crm", "zraw", "jsonl" ];
 
         title: qsTr("Choose a motion data file")
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Motion data files") + " (*." + extensions.concat(extensions.map(x => x.toUpperCase())).join(" *.") + ")"];
@@ -108,6 +110,8 @@ MenuItem {
             integrator.hasQuaternions = !additional_data.contains_quats;
             integrator.hasQuaternions = additional_data.contains_quats;
             root.hasAccurateTimestamps = additional_data.has_accurate_timestamps || false;
+            root.hasFocusDistance = additional_data.contains_focus_distance || false;
+            root.hasIris          = additional_data.contains_iris || false;
             if (additional_data.contains_quats && !is_main_video) {
                 if (integrator.hasRawGyro) {
                     integrator.currentIndex = 2;
@@ -118,10 +122,6 @@ MenuItem {
             }
             if (!additional_data.contains_quats) {
                 integrator.currentIndex = 1; // Default to VQF
-                // Default to Complementary if video is shorter than 10s
-                if (controller.get_scaled_duration_ms() < 10000) {
-                    integrator.currentIndex = 0;
-                }
             }
 
             controller.set_imu_lpf(lpfcb.checked? lpf.value : 0);
@@ -753,6 +753,7 @@ MenuItem {
                                             "Quaternion":      ["quaternion"],
                                             "Euler angles":    ["euler_angles"],
                                             "Focus distances": ["focus_distances"],
+                                            "Iris (f/T-stop)": ["iris"],
                                         },
                                     },
                                     {
@@ -769,7 +770,11 @@ MenuItem {
                                         },
                                     }
                                 ],
-                                type: "gyro_csv"
+                                type: "gyro_csv",
+                                // Files with only built-in quaternions (eg. DJI) have no raw IMU data to export
+                                unavailable: (integrator.hasRawGyro?    [] : ["originalgyroscope", "originalaccelerometer"])
+                                     .concat(root.hasFocusDistance?     [] : ["originalfocus_distances"])
+                                     .concat(root.hasIris?              [] : ["originaliris"])
                             });
                             let savedState = settings.value("CSVExportSelection", "");
                             if (savedState) {

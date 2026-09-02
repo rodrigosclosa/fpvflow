@@ -63,7 +63,10 @@ fn entry() {
     util::init_logging();
     util::update_rlimit();
     util::set_android_context();
-    log_panics::init();
+    // `log_panics` calls `std::thread::current()` from its hook. That is not
+    // valid when a Qt-owned thread panics during TLS teardown, and causes a
+    // nested panic followed by abort. Keep panic logging thread-agnostic.
+    std::panic::set_hook(Box::new(|info| ::log::error!(target: "panic", "{info}")));
 
     // The settings directory stays "Gyroflow" on purpose: this is a fork, and
     // sharing it means lens profiles and preferences carry over instead of
