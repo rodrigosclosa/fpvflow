@@ -1870,7 +1870,7 @@ impl Controller {
         // velocity-based search fired at 5.4s for a lift-off at 13s, because a
         // drone idling on the ground already stirs the gyro - the attitude, by
         // contrast, stays put until it actually leaves the ground.
-        let (attitude_z, attitude_rate) = {
+        let (attitude_z, attitude_rate, attitude_start_s) = {
             let gyro = self.stabilizer.gyro.read();
             let quats = &gyro.quaternions;
             if quats.len() >= 2 {
@@ -1891,9 +1891,13 @@ impl Controller {
                         }
                     })
                     .collect();
-                (values, rate as f32)
+                // The grid does not start at zero: the first quaternion of a
+                // clip can be seconds in, so its instant has to travel with the
+                // curve. Without it an index was read as if it were a timestamp
+                // and the lift-off came out ~2s early on a real clip.
+                (values, rate as f32, first_us / 1_000_000.0)
             } else {
-                (Vec::new(), 0.0)
+                (Vec::new(), 0.0, 0.0)
             }
         };
 
@@ -1976,7 +1980,7 @@ impl Controller {
         // The STFT runs over the whole track: seconds of work, which would freeze
         // the window if done here.
         std::thread::spawn(move || {
-            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &attitude_z, attitude_rate, &params));
+            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &attitude_z, attitude_rate, attitude_start_s, &params));
         });
     }
 
@@ -1986,7 +1990,7 @@ impl Controller {
     /// `derived_from_quats` says the motion came from integrated orientations
     /// rather than a real gyroscope, which decides the method - see the comment
     /// at `use_onset` below.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, attitude_z: &[f32], attitude_rate: f32, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, attitude_z: &[f32], attitude_rate: f32, attitude_start_s: f64, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
         use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
         use fpvflow_core::audio::sync::cross_correlate;
 
@@ -2060,7 +2064,7 @@ impl Controller {
             };
 
             if let (Some(t), Some((g, g_rate))) = (takeoff, gyro_start) {
-                let gyro_start_s = g as f64 / g_rate as f64;
+                let gyro_start_s = attitude_start_s + g as f64 / g_rate as f64;
                 // `t_audio = t_video + offset`. Note the two instants are close
                 // but NOT identical: the audio marks the propellers starting,
                 // while the gyro only reacts once the aircraft leaves the ground,

@@ -192,22 +192,20 @@ pub fn first_sustained_move(values: &[f32], baseline_window: usize, sigmas: f32,
         return None;
     }
 
-    // The SLOPE, not the distance from where it started. An aircraft waiting on
-    // the ground rarely holds a perfectly constant attitude - it settles, the
-    // ground is not level, the operator nudges it - so the curve drifts slowly
-    // the whole time. Measuring displacement from a baseline picks up that drift
-    // and fires early: on a real clip it reported 6.5s for a lift-off at 13s.
-    // What actually marks the moment is the curve turning sharply, which is a
-    // change in slope regardless of how far it has already wandered.
+    // The lift-off has a DIRECTION: the attitude Z curve falls when the aircraft
+    // leaves the ground. It does not merely change - on a real clip it climbs
+    // gently for the whole time the drone sits armed on the ground (0.68242 ->
+    // 0.68310 over 11s) and only turns downwards at the moment it lifts. Looking
+    // at the magnitude of the slope caught that climb and fired ~1.5s early, so
+    // only a sustained FALL counts here.
     let slope_at = |i: usize| -> f32 {
-        if i < hold || i + hold >= values.len() { return 0.0; }
+        if i + hold >= values.len() { return 0.0; }
         (values[i + hold] - values[i]) / hold as f32
     };
 
-    let baseline_slopes: Vec<f32> = (hold..w).map(slope_at).collect();
-    if baseline_slopes.is_empty() {
-        return None;
-    }
+    // The baseline measures how much the curve wanders while still on the
+    // ground, so the threshold adapts to each clip instead of being a constant.
+    let baseline_slopes: Vec<f32> = (0..w).map(slope_at).collect();
     let mean: f32 = baseline_slopes.iter().sum::<f32>() / baseline_slopes.len() as f32;
     let variance: f32 = baseline_slopes.iter().map(|s| (s - mean) * (s - mean)).sum::<f32>() / baseline_slopes.len() as f32;
 
@@ -215,10 +213,10 @@ pub fn first_sustained_move(values: &[f32], baseline_window: usize, sigmas: f32,
     // make any float wobble look significant.
     let threshold = (variance.sqrt() * sigmas).max(1e-6);
 
-    // Sustained, so a single jittery sample cannot trigger it: the steeper slope
-    // has to hold across the whole window.
+    // Sustained and downwards, so neither a single jittery sample nor the slow
+    // climb before the take-off can trigger it.
     (w..values.len().saturating_sub(hold * 2)).find(|&i| {
-        (i..i + hold).all(|j| (slope_at(j) - mean).abs() >= threshold)
+        (i..i + hold).all(|j| slope_at(j) - mean <= -threshold)
     })
 }
 
@@ -238,13 +236,16 @@ mod tests {
         assert!((found as i64 - 200).abs() <= 30, "found {found}, expected ~200");
     }
 
+    /// A rise is NOT a lift-off. The attitude Z curve falls when the aircraft
+    /// leaves the ground, and on a real clip it climbs gently the whole time the
+    /// drone waits armed - counting that climb fired ~1.5s early.
     #[test]
-    fn a_move_upwards_counts_the_same() {
+    fn a_move_upwards_is_not_a_lift_off() {
         let mut v = vec![0.2f32; 200];
         for i in 200..400 {
             v.push(0.2 + (i - 200) as f32 * 0.002);
         }
-        assert!(first_sustained_move(&v, 100, 6.0, 20).is_some());
+        assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
     }
 
     #[test]
@@ -276,31 +277,30 @@ mod tests {
         assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
     }
 
-    /// The real clip, with the parameters the controller actually passes:
-    /// 20 Hz, a 3s baseline (60 samples) and a 1s hold (20 samples). The
-    /// attitude drifts from the first sample - the aircraft settles on uneven
-    /// ground - and only bends at 13s, where it lifts off. The displacement
-    /// version reported 6.5s here.
+    /// The shape actually measured in `1.MP4`: the attitude Z climbs gently
+    /// while the drone sits armed on the ground (0.68242 -> 0.68310 across 11s)
+    /// and only turns downwards when it lifts, around 13s. Parameters are the
+    /// ones the controller passes: 20 Hz, a 3s baseline and a 1s hold.
     #[test]
-    fn the_real_clip_finds_the_bend_at_thirteen_seconds() {
+    fn the_real_clip_finds_the_fall_not_the_climb_before_it() {
         let rate = 20.0f32;
         let mut v = Vec::new();
-        // 13s of gentle drift with a little noise, as the aircraft waits.
-        let bend = (13.0 * rate) as usize;
-        for i in 0..bend {
-            let wobble = ((i as f32) * 0.7).sin() * 0.0008;
-            v.push(0.68 - i as f32 * 0.00008 + wobble);
+        let lift = (13.0 * rate) as usize;
+        // The climb, with the sensor wobble the real curve carries.
+        for i in 0..lift {
+            let wobble = ((i as f32) * 0.7).sin() * 0.000004;
+            v.push(0.68242 + i as f32 * 0.0000026 + wobble);
         }
-        // Then it climbs and the attitude falls away much faster.
+        // Then it falls away as the aircraft leaves the ground.
         let last = *v.last().unwrap();
         for i in 0..(10.0 * rate) as usize {
-            v.push(last - i as f32 * 0.0015);
+            v.push(last - i as f32 * 0.00012);
         }
-        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the bend exists");
+        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the fall exists");
         let seconds = found as f32 / rate;
         assert!(
             (seconds - 13.0).abs() <= 1.5,
-            "found {seconds:.2}s, expected the bend near 13s (the drift before it is not the lift-off)"
+            "found {seconds:.2}s, expected the fall near 13s (the climb before it is not the lift-off)"
         );
     }
 
