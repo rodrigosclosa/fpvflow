@@ -764,6 +764,7 @@ Item {
 
                         controller.video_file_loaded(vid);
                         window.motionData.filename = "";
+                        if (window.externalAudio) window.externalAudio.removeAudio();
 
                         if (root.pendingGyroflowData) {
                             Qt.callLater(root.loadGyroflowData, root.pendingGyroflowData, root.pendingQueueJobId);

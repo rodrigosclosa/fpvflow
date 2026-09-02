@@ -434,14 +434,18 @@ MenuItem {
         }
     }
 
+    /// Drops the track. Also called when a new video is loaded: a track belongs
+    /// to the clip it was aligned with, and a project file brings its own back.
+    function removeAudio(): void {
+        controller.clear_external_audio(root.getAudioWaveform());
+        audioOffset.value = 0;
+        autoSyncResult.text = "";
+    }
+
     Button {
         text: qsTr("Remove audio");
         width: parent.width;
         visible: root.hasAudio;
-        onClicked: {
-            controller.clear_external_audio(root.getAudioWaveform());
-            audioOffset.value = 0;
-            autoSyncResult.text = "";
-        }
+        onClicked: root.removeAudio();
     }
 }
