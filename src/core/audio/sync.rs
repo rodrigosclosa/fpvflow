@@ -276,6 +276,34 @@ mod tests {
         assert_eq!(first_sustained_move(&v, 100, 6.0, 20), None);
     }
 
+    /// The real clip, with the parameters the controller actually passes:
+    /// 20 Hz, a 3s baseline (60 samples) and a 1s hold (20 samples). The
+    /// attitude drifts from the first sample - the aircraft settles on uneven
+    /// ground - and only bends at 13s, where it lifts off. The displacement
+    /// version reported 6.5s here.
+    #[test]
+    fn the_real_clip_finds_the_bend_at_thirteen_seconds() {
+        let rate = 20.0f32;
+        let mut v = Vec::new();
+        // 13s of gentle drift with a little noise, as the aircraft waits.
+        let bend = (13.0 * rate) as usize;
+        for i in 0..bend {
+            let wobble = ((i as f32) * 0.7).sin() * 0.0008;
+            v.push(0.68 - i as f32 * 0.00008 + wobble);
+        }
+        // Then it climbs and the attitude falls away much faster.
+        let last = *v.last().unwrap();
+        for i in 0..(10.0 * rate) as usize {
+            v.push(last - i as f32 * 0.0015);
+        }
+        let found = first_sustained_move(&v, 60, 6.0, 20).expect("the bend exists");
+        let seconds = found as f32 / rate;
+        assert!(
+            (seconds - 13.0).abs() <= 1.5,
+            "found {seconds:.2}s, expected the bend near 13s (the drift before it is not the lift-off)"
+        );
+    }
+
     /// Envelope that rises at `first` and rises much harder later, which is the
     /// shape that broke the previous "largest rise" logic: quiet, take-off, then
     /// something louder further in (crowd, music, a low pass).
