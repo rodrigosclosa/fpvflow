@@ -3393,7 +3393,7 @@ dependencies = [
 [[package]]
 name = "qml-video-rs"
 version = "0.1.0"
-source = "git+https://github.com/rodrigosclosa/qml-video-rs.git?rev=0ce8b25#0ce8b2539093ce96bf82b98010ba9888cc9aa5bf"
+source = "git+https://github.com/rodrigosclosa/qml-video-rs.git?rev=b9ec383#b9ec383a53f6df7f67a38209ea7361981690e70a"
 dependencies = [
  "cpp",
  "cpp_build",
@@ -4352,7 +4352,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
