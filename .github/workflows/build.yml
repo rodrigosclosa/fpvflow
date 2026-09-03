@@ -161,8 +161,15 @@ jobs:
 
             ## These builds are not signed
 
-            **macOS:** the first launch is blocked. Right-click the app and choose
-            Open, or run:
+            **macOS:** the first launch is blocked with "FPVFlow cannot be opened
+            because Apple cannot verify it". Close that dialog, open **System
+            Settings → Privacy & Security** and scroll down to the **Security**
+            section: it says "FPVFlow was blocked to protect your Mac" with an
+            **Open Anyway** button. Click it, confirm, and enter your password.
+            This is needed only once. Right-click → Open no longer works for
+            unsigned apps on macOS 15 (Sequoia) and later.
+
+            Alternatively, remove the quarantine flag from a terminal:
 
             ```
             xattr -dr com.apple.quarantine /Applications/FPVFlow.app
