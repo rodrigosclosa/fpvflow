@@ -188,6 +188,9 @@ description: >-
   .dl .os { font-size: 20px; font-weight: 700; }
   .dl .file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--muted); }
   .dl .card .btn { margin-top: auto; justify-content: center; }
+  .badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 16px; }
+  .badges a:hover { opacity: .85; }
+  .badges img { height: 20px; display: inline-block; }
   .mac-note {
     display: none; max-width: 760px; margin: 18px auto 0; padding: 14px 18px; text-align: left;
     border-radius: 12px; border: 1px solid rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08);
@@ -247,6 +250,14 @@ description: >-
         <a class="btn btn-ghost" href="{{ '/docs/' | relative_url }}">Read the docs</a>
       </div>
       <p class="cta-note">Free and open source (GPL-3.0) - Windows, macOS and Linux</p>
+      <div class="badges">
+        <a href="https://github.com/rodrigosclosa/fpvflow/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/rodrigosclosa/fpvflow?label=release&color=22d3ee&style=flat-square&labelColor=151a20"></a>
+        <a href="https://github.com/rodrigosclosa/fpvflow/actions/workflows/build.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/rodrigosclosa/fpvflow/build.yml?label=build&style=flat-square&labelColor=151a20"></a>
+        <a href="https://github.com/rodrigosclosa/fpvflow/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/rodrigosclosa/fpvflow/total?label=downloads&color=22d3ee&style=flat-square&labelColor=151a20"></a>
+        <a href="https://github.com/rodrigosclosa/fpvflow/commits/fpvflow"><img alt="Last commit" src="https://img.shields.io/github/last-commit/rodrigosclosa/fpvflow/fpvflow?label=last%20commit&style=flat-square&labelColor=151a20"></a>
+        <a href="https://github.com/rodrigosclosa/fpvflow/blob/fpvflow/LICENSE"><img alt="License" src="https://img.shields.io/github/license/rodrigosclosa/fpvflow?color=9aa6b2&style=flat-square&labelColor=151a20"></a>
+        <a href="https://github.com/gyroflow/gyroflow"><img alt="Based on Gyroflow 1.6.3" src="https://img.shields.io/badge/based%20on-Gyroflow%201.6.3-0ea5c4?style=flat-square&labelColor=151a20"></a>
+      </div>
       <div class="mac-note">
         <b>First launch on macOS:</b> FPVFlow is not signed by Apple, so macOS blocks it the first time.
         Open <b>System Settings &rarr; Privacy &amp; Security</b>, scroll to <i>Security</i> and click
