@@ -214,6 +214,258 @@ fn first_rise_with_sustain(envelope: &[f32]) -> Option<(usize, f32)> {
     Some((onset, sustain))
 }
 
+/// The beep the motors play when the aircraft arms.
+///
+/// It is the cleanest mark in the whole recording: a pure tone (5988 Hz on the
+/// test material), three pulses of ~0.3s, always before the take-off. It was
+/// found in 11 of 12 recordings made at an event, where the music and the crowd
+/// hid everything else - and it is what the old take-off rule mistook for the
+/// propellers spinning up, landing 2-3s off.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArmingBeep {
+    /// Seconds from the start of the audio to the first pulse.
+    pub start_seconds: f64,
+    /// Seconds from the start of the audio to the end of the last pulse.
+    pub end_seconds: f64,
+    /// Frequency of the tone, in Hz.
+    pub freq_hz: f32,
+}
+
+/// Seconds from the start of the arming beep to the first video frame, for a
+/// camera that starts recording when the aircraft arms.
+///
+/// Measured against hand-aligned offsets on three DJI O4 Pro clips: 0.65s,
+/// 0.76s and 0.87s. Only valid when the recording did start on arm, which the
+/// caller has to check - a recording started by hand has no relation to it.
+pub const ARM_TO_RECORDING_S: f64 = 0.76;
+
+/// The beep is searched in the first two minutes: it precedes the take-off, and
+/// further in, the propellers' own tones are the only thing that could match.
+const BEEP_SEARCH_S: f32 = 120.0;
+const BEEP_FFT: usize = 4096;
+const BEEP_HOP_S: f32 = 0.01;
+const BEEP_LO_HZ: f32 = 1000.0;
+const BEEP_HI_HZ: f32 = 9000.0;
+/// How far above its surroundings (±350 Hz) a bin must stand to count as a tone.
+const BEEP_MIN_CONTRAST_DB: f32 = 12.0;
+/// Average contrast a whole beep must reach. Music and propeller tones form
+/// pulses too, but none this clean on the test set.
+const BEEP_MEAN_CONTRAST_DB: f32 = 18.0;
+const BEEP_PULSE_MIN_S: f32 = 0.15;
+const BEEP_PULSE_MAX_S: f32 = 0.8;
+/// Nominal pulse length: a pulse this long counts as one, twice as long as two
+/// (the gap between them was not resolved).
+const BEEP_PULSE_S: f32 = 0.33;
+const BEEP_MAX_GAP_S: f32 = 0.15;
+const BEEP_MIN_PULSES: usize = 3;
+
+/// Finds the arming beep: the FIRST run of three pure-tone pulses at the same
+/// frequency. The first, not the cleanest: later in a recording the propellers
+/// produce steady tones of their own.
+pub fn detect_arming_beep(mono: &[f32], sample_rate: u32) -> Option<ArmingBeep> {
+    use rustfft::{num_complex::Complex, FftPlanner};
+
+    if mono.len() < BEEP_FFT || sample_rate == 0 {
+        return None;
+    }
+    let sr = sample_rate as f32;
+    let hop = ((sr * BEEP_HOP_S) as usize).max(1);
+    let limit = mono.len().min((sr * BEEP_SEARCH_S) as usize);
+    let bin_hz = sr / BEEP_FFT as f32;
+    let lo_bin = (BEEP_LO_HZ / bin_hz) as usize;
+    let hi_bin = ((BEEP_HI_HZ / bin_hz) as usize).min(BEEP_FFT / 2 - 1);
+    // Surroundings: 30 bins (~350 Hz at 48 kHz) each side, skipping the 3 next
+    // to the bin, where its own leakage sits.
+    const SIDE: usize = 30;
+    const SKIP: usize = 3;
+    if hi_bin <= lo_bin + 2 * SIDE {
+        return None;
+    }
+
+    let window: Vec<f32> = (0..BEEP_FFT)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / BEEP_FFT as f32).cos())
+        .collect();
+    let fft = FftPlanner::<f32>::new().plan_fft_forward(BEEP_FFT);
+    let mut buf = vec![Complex::new(0.0f32, 0.0); BEEP_FFT];
+    let mut power = vec![0.0f32; BEEP_FFT / 2];
+    let mut prefix = vec![0.0f64; BEEP_FFT / 2 + 1];
+
+    // Per frame: the most tonal bin and how tonal it is.
+    let mut frames: Vec<(f32, usize)> = Vec::new();
+    let mut start = 0usize;
+    while start + BEEP_FFT <= limit {
+        for i in 0..BEEP_FFT {
+            buf[i] = Complex::new(mono[start + i] * window[i], 0.0);
+        }
+        fft.process(&mut buf);
+        for (k, p) in power.iter_mut().enumerate() {
+            *p = buf[k].norm_sqr();
+        }
+        for k in 0..power.len() {
+            prefix[k + 1] = prefix[k] + power[k] as f64;
+        }
+        let mut best = (f32::MIN, 0usize);
+        for k in (lo_bin + SIDE)..(hi_bin - SIDE) {
+            let around = (prefix[k - SKIP] - prefix[k - SIDE]) + (prefix[k + SIDE + 1] - prefix[k + SKIP + 1]);
+            let mean = around / (2 * (SIDE - SKIP)) as f64;
+            let contrast = 10.0 * ((power[k] as f64 + 1e-20) / (mean + 1e-20)).log10() as f32;
+            if contrast > best.0 {
+                best = (contrast, k);
+            }
+        }
+        frames.push(best);
+        start += hop;
+    }
+
+    // Pulses: runs of tonal frames on the same bin (±1).
+    struct Pulse { from: usize, to: usize, bin: usize }
+    let mut pulses: Vec<Pulse> = Vec::new();
+    let mut current: Option<Pulse> = None;
+    for (i, &(contrast, bin)) in frames.iter().enumerate() {
+        let tonal = contrast > BEEP_MIN_CONTRAST_DB;
+        match current.as_mut() {
+            Some(p) if tonal && bin.abs_diff(p.bin) <= 1 => {
+                p.to = i;
+            }
+            _ => {
+                if let Some(p) = current.take() {
+                    let len_s = (p.to - p.from) as f32 * BEEP_HOP_S;
+                    if (BEEP_PULSE_MIN_S..=BEEP_PULSE_MAX_S).contains(&len_s) {
+                        pulses.push(p);
+                    }
+                }
+                if tonal {
+                    current = Some(Pulse { from: i, to: i, bin });
+                }
+            }
+        }
+    }
+
+    // The first group of pulses on one frequency, close together, that adds up
+    // to three and is clean enough on average.
+    for (i, first) in pulses.iter().enumerate() {
+        let mut last = first;
+        let mut count = 0usize;
+        for p in &pulses[i..] {
+            if !std::ptr::eq(p, first) {
+                let gap_s = p.from.saturating_sub(last.to) as f32 * BEEP_HOP_S;
+                if gap_s > BEEP_MAX_GAP_S || p.from < last.to {
+                    break;
+                }
+                if p.bin.abs_diff(first.bin) > 1 {
+                    continue;
+                }
+            }
+            let len_s = (p.to - p.from) as f32 * BEEP_HOP_S;
+            count += ((len_s / BEEP_PULSE_S).round() as usize).max(1);
+            last = p;
+        }
+        if count < BEEP_MIN_PULSES {
+            continue;
+        }
+        // Averaged over the whole span, gaps included: a real beep is tonal
+        // from end to end, scattered tones are not.
+        let span = &frames[first.from..=last.to];
+        let mean_contrast = span.iter().map(|f| f.0).sum::<f32>() / span.len() as f32;
+        if mean_contrast >= BEEP_MEAN_CONTRAST_DB {
+            // Frame time is its window's centre.
+            let centre = BEEP_FFT as f64 / 2.0 / sr as f64;
+            return Some(ArmingBeep {
+                start_seconds: first.from as f64 * BEEP_HOP_S as f64 + centre,
+                end_seconds: last.to as f64 * BEEP_HOP_S as f64 + centre,
+                freq_hz: first.bin as f32 * bin_hz,
+            });
+        }
+    }
+    None
+}
+
+/// Take-off searched only after the arming beep: the first time the propellers
+/// go from idle to flight power.
+///
+/// After arming the motors idle - loud enough to pass any "sustained rise" test,
+/// which is why the beep and the idle were taken for the take-off. Measuring the
+/// rise against that idle level instead finds the throttle-up.
+pub fn detect_after_arming(mono: &[f32], sample_rate: u32, beep: &ArmingBeep) -> Option<f64> {
+    if sample_rate == 0 {
+        return None;
+    }
+    let sr = sample_rate as f32;
+    let from = ((beep.end_seconds as f32 + 0.3) * sr) as usize;
+    if from >= mono.len() {
+        return None;
+    }
+    // Blade noise sits above ~1.2 kHz; the beep's own tone is left out so a
+    // repeat of it cannot look like power.
+    let (lo, hi) = (1200.0f32, 8000.0f32.min(sr / 2.0 * 0.9));
+    let mut envelope = band_envelope_excluding(&mono[from..], sample_rate, lo, hi, beep.freq_hz);
+    let r = ENVELOPE_RATE_HZ as usize;
+    // One-second moving average: a single loud moment is not a throttle-up.
+    smooth(&mut envelope, r);
+    if envelope.len() < r * 6 {
+        return None;
+    }
+    let idle = median(&envelope[..r]).max(1e-9);
+    let hold = r * 5;
+    for i in 0..envelope.len() - hold {
+        if envelope[i] > idle * 4.0 && median(&envelope[i..i + hold]) > idle * 3.0 {
+            let mut j = i;
+            while j > 0 && envelope[j - 1] > idle * 2.0 {
+                j -= 1;
+            }
+            return Some(from as f64 / sample_rate as f64 + j as f64 / ENVELOPE_RATE_HZ as f64);
+        }
+    }
+    None
+}
+
+/// Band power over time, like [`band_envelope`] but without its normalization,
+/// in power rather than magnitude, and leaving out the probes within 150 Hz of
+/// `exclude_hz`.
+fn band_envelope_excluding(mono: &[f32], sample_rate: u32, f_lo: f32, f_hi: f32, exclude_hz: f32) -> Vec<f32> {
+    const WINDOW: usize = 2048;
+    let hop = (sample_rate as f32 / ENVELOPE_RATE_HZ).max(1.0) as usize;
+    let mut probes = Vec::new();
+    let mut f = f_lo;
+    while f < f_hi {
+        if (f - exclude_hz).abs() > 150.0 {
+            probes.push(f);
+        }
+        f += 200.0;
+    }
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    let mut envelope = Vec::new();
+    let mut start = 0usize;
+    while start + WINDOW < mono.len() {
+        let window = &mono[start..start + WINDOW];
+        // Power, not magnitude: the thresholds below were measured on power.
+        let total: f32 = probes.iter().map(|&f| goertzel(window, sample_rate as f32, f).powi(2)).sum();
+        envelope.push(total / probes.len() as f32);
+        start += hop;
+    }
+    envelope
+}
+
+/// Centered moving average over `n` samples, in place.
+fn smooth(values: &mut Vec<f32>, n: usize) {
+    if n < 2 || values.len() < n {
+        return;
+    }
+    let half = n / 2;
+    let src = values.clone();
+    let mut prefix = vec![0.0f64; src.len() + 1];
+    for (i, v) in src.iter().enumerate() {
+        prefix[i + 1] = prefix[i] + *v as f64;
+    }
+    for i in 0..src.len() {
+        let a = i.saturating_sub(half);
+        let b = (i + half + 1).min(src.len());
+        values[i] = ((prefix[b] - prefix[a]) / (b - a) as f64) as f32;
+    }
+}
+
 fn median(values: &[f32]) -> f32 {
     if values.is_empty() {
         return 0.0;
@@ -280,6 +532,31 @@ mod tests {
         let signal = synth(40.0, 0.02, 6000.0, 12.0, 35.0, 0.5);
         let found = detect(&signal, SR).expect("a flight is present");
         assert!((found.time_seconds - 12.0).abs() < 1.5, "found {:.2}s, expected ~12s", found.time_seconds);
+    }
+
+    /// Runs on real recordings: `FPVFLOW_AUDIO_DIR=<folder> cargo test -p fpvflow-core
+    /// --release arming_beep_on_real_recordings -- --ignored --nocapture`. Prints
+    /// what was found in each `.wav`; the hand-aligned offsets are compared by eye.
+    #[test]
+    #[ignore]
+    fn arming_beep_on_real_recordings() {
+        let Ok(dir) = std::env::var("FPVFLOW_AUDIO_DIR") else { return; };
+        let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map_or(false, |e| e.eq_ignore_ascii_case("wav")))
+            .collect();
+        files.sort();
+        for path in files {
+            let url = format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
+            let Ok(track) = crate::audio::decode::decode_file(&url) else { println!("{:?}: cannot decode", path); continue; };
+            let mono = &track.mono_analysis;
+            let t0 = std::time::Instant::now();
+            let beep = detect_arming_beep(mono, track.sample_rate);
+            let after = beep.as_ref().and_then(|b| detect_after_arming(mono, track.sample_rate, b));
+            println!("{:40} beep {:?}  take-off after {:?}  ({:.0} ms)",
+                path.file_name().unwrap().to_string_lossy(), beep.map(|b| (b.start_seconds, b.end_seconds, b.freq_hz)), after,
+                t0.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     #[test]

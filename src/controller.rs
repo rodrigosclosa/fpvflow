@@ -2080,8 +2080,6 @@ impl Controller {
             // the alignment - on a real 185s clip that put the answer 103s off.
             // The take-off is a single unambiguous instant that both signals
             // witness, so pinning it is far more robust than matching shapes.
-            let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
-
             // Lift-off is the first time the angular speed leaves the ground
             // floor for good; `sync::lift_off` has the rule and what did not
             // work before it.
@@ -2091,6 +2089,38 @@ impl Controller {
             } else {
                 None
             };
+
+            // The arming beep, when the microphone caught it, beats everything
+            // below. With a camera that records on arm, the first frame comes
+            // ARM_TO_RECORDING_S after the beep, which pins the offset to about
+            // 0.1s - the take-off pairing is off by 1.5s or more, because the
+            // orientation reaches us at ~2 Hz. But recording on arm is a setting,
+            // not a rule: a recording started by hand has no relation to the beep.
+            // So the beep is only trusted when the take-off pairing, now searched
+            // after the beep instead of anywhere, roughly agrees with it.
+            if let Some(beep) = fpvflow_core::audio::takeoff::detect_arming_beep(mono, sample_rate) {
+                let after = fpvflow_core::audio::takeoff::detect_after_arming(mono, sample_rate, &beep);
+                let gyro_start_s = gyro_start.map(|(g, g_rate)| speed_start_s + g as f64 / g_rate as f64);
+                if let (Some(audio_takeoff), Some(gyro_start_s)) = (after, gyro_start_s) {
+                    // 2.5s: the take-off pairing alone was 1.7s away on the
+                    // reference clip, and a camera started by hand is usually
+                    // started well before the pilot arms.
+                    const ARM_AGREEMENT_S: f64 = 2.5;
+                    let on_arm = beep.start_seconds + fpvflow_core::audio::takeoff::ARM_TO_RECORDING_S;
+                    let by_takeoff = audio_takeoff - gyro_start_s;
+                    let agree = (on_arm - by_takeoff).abs() <= ARM_AGREEMENT_S;
+                    ::log::info!(
+                        "Audio auto-sync [arming beep]: beep at {:.2}s ({:.0} Hz), take-off after it at {:.2}s, lift-off (gyro) at {:.2}s -> recorded on arm {:.3}s, by take-off {:.3}s, {}",
+                        beep.start_seconds, beep.freq_hz, audio_takeoff, gyro_start_s, on_arm, by_takeoff,
+                        if agree { "using the beep" } else { "recording did not start on arm, using the take-off" }
+                    );
+                    return Some(if agree { (on_arm, 0.9, true) } else { (by_takeoff, 0.5, true) });
+                }
+                ::log::info!("Audio auto-sync: arming beep at {:.2}s, but no take-off to check it against (audio: {}, lift-off: {})",
+                    beep.start_seconds, after.is_some(), gyro_start_s.is_some());
+            }
+
+            let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
 
             if let (Some(t), Some((g, g_rate))) = (takeoff, gyro_start) {
                 let gyro_start_s = speed_start_s + g as f64 / g_rate as f64;
