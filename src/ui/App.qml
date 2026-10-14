@@ -176,8 +176,8 @@ Rectangle {
                     wrapMode: Text.WordWrap;
                     font.pixelSize: 11 * dpiScale;
                     opacity: 0.6;
-                    text: qsTr("Gyroflow melhorado para pilotos de FPV") + "\n"
-                        + qsTr("v%1 · baseado no Gyroflow %2").arg(Qt.application.version).arg("1.6.3");
+                    text: qsTr("Gyroflow enhanced for FPV pilots") + "\n"
+                        + qsTr("v%1 · based on Gyroflow %2").arg(Qt.application.version).arg("1.6.3");
                 }
                 Hr { }
             }

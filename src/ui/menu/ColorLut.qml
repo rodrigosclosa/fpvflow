@@ -53,23 +53,23 @@ MenuItem {
     /// `min` is -100 for bipolar controls and 0 for the one-sided ones; `to` is
     /// always 100.
     readonly property var adjustmentGroups: [
-        { "title": qsTr("Luz"), "items": [
-            { "name": "exposure",    "label": qsTr("Exposição"),   "min": -100, "unit": "%" },
-            { "name": "luminance",   "label": qsTr("Luminância"),  "min": -100, "unit": "%" },
-            { "name": "contrast",    "label": qsTr("Contraste"),   "min": -100, "unit": "%" },
-            { "name": "highlights",  "label": qsTr("Destaques"),   "min": -100, "unit": "%" },
-            { "name": "shadows",     "label": qsTr("Sombras"),     "min": -100, "unit": "%" },
-            { "name": "whites",      "label": qsTr("Brancos"),     "min": -100, "unit": "%" },
-            { "name": "blacks",      "label": qsTr("Pretos"),      "min": -100, "unit": "%" }
+        { "title": qsTr("Light"), "items": [
+            { "name": "exposure",    "label": qsTr("Exposure"),   "min": -100, "unit": "%" },
+            { "name": "luminance",   "label": qsTr("Luminance"),  "min": -100, "unit": "%" },
+            { "name": "contrast",    "label": qsTr("Contrast"),   "min": -100, "unit": "%" },
+            { "name": "highlights",  "label": qsTr("Highlights"),   "min": -100, "unit": "%" },
+            { "name": "shadows",     "label": qsTr("Shadows"),     "min": -100, "unit": "%" },
+            { "name": "whites",      "label": qsTr("Whites"),     "min": -100, "unit": "%" },
+            { "name": "blacks",      "label": qsTr("Blacks"),      "min": -100, "unit": "%" }
         ]},
-        { "title": qsTr("Cor"), "items": [
-            { "name": "temperature", "label": qsTr("Temperatura"), "min": -100, "unit": "%" },
-            { "name": "tint",        "label": qsTr("Matiz"),       "min": -100, "unit": "%" },
-            { "name": "saturation",  "label": qsTr("Saturação"),   "min": -100, "unit": "%" },
-            { "name": "vibrance",    "label": qsTr("Vivacidade"),  "min": -100, "unit": "%" }
+        { "title": qsTr("Color"), "items": [
+            { "name": "temperature", "label": qsTr("Temperature"), "min": -100, "unit": "%" },
+            { "name": "tint",        "label": qsTr("Tint"),       "min": -100, "unit": "%" },
+            { "name": "saturation",  "label": qsTr("Saturation"),   "min": -100, "unit": "%" },
+            { "name": "vibrance",    "label": qsTr("Vibrance"),  "min": -100, "unit": "%" }
         ]},
-        { "title": qsTr("Efeito"), "items": [
-            { "name": "sharpness",   "label": qsTr("Nitidez"),     "min": 0,    "unit": "%" },
+        { "title": qsTr("Effect"), "items": [
+            { "name": "sharpness",   "label": qsTr("Sharpness"),     "min": 0,    "unit": "%" },
             { "name": "vignette",    "label": qsTr("Vignette"),    "min": 0,    "unit": "%" }
         ]}
     ];
@@ -305,7 +305,7 @@ MenuItem {
     // the common case is a LUT and nothing else.
     AdvancedSection {
         id: adjustmentsSection;
-        btn.text: qsTr("Correção Básica");
+        btn.text: qsTr("Basic correction");
 
         Repeater {
             model: root.adjustmentGroups;
@@ -346,7 +346,7 @@ MenuItem {
         }
 
         Button {
-            text: qsTr("Redefinir ajustes");
+            text: qsTr("Reset adjustments");
             iconName: "undo";
             width: parent.width;
             onClicked: root.resetAdjustments();
