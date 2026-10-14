@@ -131,6 +131,16 @@ mod tests {
         assert_eq!(repair(&mut data, &Settings::default()), 0);
     }
 
+    #[test]
+    fn a_new_or_cleared_gyro_source_has_the_default_sensitivity() {
+        // The UI restores the slider from the project, and a fresh project must not say 0%.
+        let mut gyro = GyroSource::new();
+        assert_eq!(gyro.imu_transforms.gyrogate_strength, 50.0);
+        gyro.imu_transforms.gyrogate_strength = 10.0;
+        gyro.clear();
+        assert_eq!(gyro.imu_transforms.gyrogate_strength, 50.0);
+    }
+
     fn load(path: &std::path::Path) -> TimeQuat {
         let mut file = std::fs::File::open(path).unwrap();
         let size = file.metadata().unwrap().len() as usize;

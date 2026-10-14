@@ -388,7 +388,9 @@ MenuItem {
             Label {
                 text: qsTr("Sensitivity");
                 width: parent.width;
-                tooltip: qsTr("Higher values also catch smaller false rotations, but may touch real fast motion. 50% is the default.");
+                tooltip: qsTr("How small a false rotation can be and still be removed. A rotation counts as false when one axis jumps above the threshold for a few milliseconds while the other two stay calm.") + "\n\n" +
+                         qsTr("0%: threshold 120 °/s, only the large, obvious jolts.\n50% (default): threshold 60 °/s, tuned against Betaflight blackbox logs.\n100%: threshold 30 °/s, also small jolts, but it may mistake real knocks for false ones.") + "\n\n" +
+                         qsTr("Raise it if small jolts remain in the stabilized video with the repair on. Lower it if real motion, such as a knock or an impact, looks smoothed away. The value is saved with the project and used for the corrected copy.");
                 SliderWithField {
                     id: gyrogateStrength;
                     defaultValue: 50;

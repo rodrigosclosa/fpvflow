@@ -79,6 +79,7 @@ impl GyroSource {
             integration_method: 2, // VQF
             use_gravity_vectors: false,
             horizon_lock_integration_method: 1, // VQF
+            imu_transforms: IMUTransforms { gyrogate_strength: 50.0, ..Default::default() },
             ..Default::default()
         }
     }
