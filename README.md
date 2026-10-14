@@ -17,7 +17,8 @@
     <a href="https://github.com/rodrigosclosa/fpvflow/releases">Download</a> •
     <a href="https://github.com/rodrigosclosa/fpvflow/issues">Report bug</a> •
     <a href="https://github.com/rodrigosclosa/fpvflow/issues">Request feature</a> •
-    <a href="https://docs.gyroflow.xyz">Gyroflow docs</a>
+    <a href="https://rodrigosclosa.github.io/fpvflow/">Website</a> •
+    <a href="https://rodrigosclosa.github.io/fpvflow/docs/">Documentation</a>
   </p>
   <p align="center">
     <a href="https://github.com/rodrigosclosa/fpvflow/releases">
@@ -229,8 +230,11 @@ page and the build artifacts on the Actions tab. It is not in any app store.
 
 ### macOS
 - Download the macOS artifact, unzip it and drag `FPVFlow.app` to Applications
-- **First launch: right-click the app and choose Open**, then confirm. A plain double-click will
-  be refused. macOS remembers the choice, so this is only needed once. See below for why.
+- **First launch:** macOS refuses it the first time. Open **System Settings → Privacy & Security**,
+  click **Open Anyway** next to "FPVFlow was blocked", and confirm. Right-click → Open no longer
+  works for unsigned apps on macOS 15 and later. macOS remembers the choice, so this is only
+  needed once. See below for why. (In a terminal, `xattr -dr com.apple.quarantine
+  /Applications/FPVFlow.app` does the same.)
 - Universal binary: works on both Apple Silicon and Intel
 
 ### Linux
@@ -254,7 +258,7 @@ Code signing is not a single fee - it is a recurring one, per platform:
 
 | Platform | What it costs | What you see without it |
 |---|---|---|
-| macOS | Apple Developer Program, **US$ 99/year** | Right-click → Open on first launch |
+| macOS | Apple Developer Program, **US$ 99/year** | **Open Anyway** in System Settings on first launch |
 | Windows | Code signing certificate, **~US$ 200-400/year** | SmartScreen warning on first run |
 
 For a free tool with no revenue, that is a real yearly bill for the removal of two one-time
