@@ -565,6 +565,8 @@ impl GyroSource {
         self.imu_transforms.imu_mf = 0;
         self.imu_transforms.glitch_filter = false;
         self.imu_transforms.glitch_strength = 0.0;
+        self.imu_transforms.gyrogate_filter = false;
+        self.imu_transforms.gyrogate_strength = 50.0;
         self.file_metadata = Default::default();
         self.clear_offsets();
     }
@@ -629,6 +631,15 @@ impl GyroSource {
                 } else {
                     file_metadata.quaternions.clone()
                 };
+                // Before the generic filters: it removes the raw sensor bursts and the
+                // fusion's pull-back of them, which the glitch filter and low-pass would smear.
+                if self.imu_transforms.gyrogate_filter && self.quaternions.len() >= 8 {
+                    let settings = crate::gyrogate::Settings::from_strength(self.imu_transforms.gyrogate_strength);
+                    let removed = crate::gyrogate::memory::repair(&mut self.quaternions, &settings);
+                    if removed > 0 {
+                        log::info!("Gyrogate: removed {} false burst(s)", removed);
+                    }
+                }
                 if self.imu_transforms.glitch_filter && self.quaternions.len() >= 8 {
                     let params = super::filtering::GlitchRepairParams::from_strength(self.imu_transforms.glitch_strength);
                     let patched = super::filtering::GlitchRepair::repair_quats(&mut self.quaternions, &params);
@@ -931,6 +942,8 @@ impl GyroSource {
         hasher.write_i32(self.imu_transforms.imu_mf);
         hasher.write_u8(if self.imu_transforms.glitch_filter { 1 } else { 0 });
         hasher.write_u64(self.imu_transforms.glitch_strength.to_bits());
+        hasher.write_u8(if self.imu_transforms.gyrogate_filter { 1 } else { 0 });
+        hasher.write_u64(self.imu_transforms.gyrogate_strength.to_bits());
         hasher.write_usize(self.raw_imu.len());
         hasher.write_usize(file_metadata.raw_imu.len());
         hasher.write_usize(self.quaternions.len());

@@ -15,6 +15,11 @@ pub struct IMUTransforms {
     pub imu_mf: i32,
     pub glitch_filter: bool,
     pub glitch_strength: f64,
+    /// DJI O4 "Gyrogate" repair of the attitude quaternions, see `crate::gyrogate`.
+    #[serde(default)]
+    pub gyrogate_filter: bool,
+    #[serde(default)]
+    pub gyrogate_strength: f64,
     pub gyro_bias: Option<[f64; 3]>,
 }
 impl IMUTransforms {

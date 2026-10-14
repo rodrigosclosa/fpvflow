@@ -10,7 +10,7 @@ MenuItem {
     id: root;
     text: qsTr("Motion data");
     iconName: "chart";
-    loader: controller.loading_gyro_in_progress;
+    loader: controller.loading_gyro_in_progress || root.gyrogateBusy;
     objectName: "motiondata";
 
     property alias hasQuaternions: integrator.hasQuaternions;
@@ -24,6 +24,15 @@ MenuItem {
     property string filename: "";
     property string detectedFormat: "";
     property url lastSelectedFile: "";
+    // DJI O4 Gyrogate detection of the loaded motion data (see `gyrogate` in controller.rs),
+    // null for other cameras.
+    property var gyrogate: null;
+    property bool gyrogateBusy: false;
+    property real gyrogateProgress: 0;
+    // The clip the corrected copy is being written for, to apply it only if still loaded.
+    property string gyrogateCopyFor: "";
+    readonly property bool gyrogateRecommended: !!gyrogate && !!gyrogate.summary && gyrogate.summary.bursts > 0
+                                                && gyrogate.unit.chip != "mp66" && !gyrogate.repaired_copy;
 
     FileDialog {
         id: fileDialog;
@@ -74,6 +83,16 @@ MenuItem {
             if (gyro.hasOwnProperty("glitch_filter")) {
                 glitchcb.checked = !!gyro.glitch_filter;
             }
+            if (typeof gyro.gyrogate_strength === "number") {
+                gyrogateStrength.value = +gyro.gyrogate_strength;
+            }
+            if (gyro.hasOwnProperty("gyrogate_filter")) {
+                gyrogatecb.checked = !!gyro.gyrogate_filter;
+            } else if (obj.videofile) {
+                // A project saved before the repair existed keeps the look it was saved with.
+                gyrogatecb.checked = false;
+            }
+            controller.set_gyrogate_filter(gyrogatecb.checked, gyrogateStrength.value);
             if (typeof gyro.sample_index === "number") {
                 currentLog.currentIndex = gyro.sample_index + 1;
             }
@@ -127,6 +146,11 @@ MenuItem {
             controller.set_imu_lpf(lpfcb.checked? lpf.value : 0);
             controller.set_imu_median_filter(mfcb.checked? mf.value : 0);
             controller.set_glitch_filter(glitchcb.checked, glitchStrength.value);
+            // On by default where the clip shows the defect; a project loaded afterwards
+            // restores its own choice through loadGyroflow().
+            root.gyrogate = additional_data.gyrogate || null;
+            gyrogatecb.checked = root.gyrogateRecommended;
+            controller.set_gyrogate_filter(gyrogatecb.checked, gyrogateStrength.value);
             controller.set_imu_rotation(rot.checked? p.value : 0, rot.checked? r.value : 0, rot.checked? y.value : 0);
             controller.set_acc_rotation(arot.checked? ap.value : 0, arot.checked? ar.value : 0, arot.checked? ay.value : 0);
             Qt.callLater(controller.recompute_gyro);
@@ -316,6 +340,121 @@ MenuItem {
                     controller.set_glitch_filter(glitchcb.checked, value);
                     Qt.callLater(controller.recompute_gyro);
                 }
+            }
+        }
+    }
+    Column {
+        id: gyrogateSection;
+        width: parent.width;
+        spacing: 5 * dpiScale;
+        visible: !!root.gyrogate;
+
+        function unitText(): string {
+            const g = root.gyrogate;
+            if (!g) return "";
+            const built = g.unit.built? (("0" + g.unit.built[1]).slice(-2) + "/" + g.unit.built[0]) : "";
+            switch (g.unit.chip) {
+                case "icm40609d":         return qsTr("DJI O4 Lite: ICM-40609-D gyro, which records false rotations under vibration (DJI Gyrogate).");
+                case "icm40609d_likely":  return qsTr("DJI O4 Pro built in %1: most likely the new ICM-40609-D gyro, which records false rotations under vibration (DJI Gyrogate).").arg(built);
+                case "unsure":            return qsTr("DJI O4 Pro built in %1, when DJI was switching to the ICM-40609-D gyro: it may be affected by DJI Gyrogate.").arg(built);
+                case "mp66":              return qsTr("DJI O4 Pro built in %1: original MP66 gyro, not affected by DJI Gyrogate.").arg(built);
+                default:                  return qsTr("DJI O4 Pro with an unknown production date: it may be affected by DJI Gyrogate.");
+            }
+        }
+        function summaryText(): string {
+            const g = root.gyrogate;
+            if (!g) return "";
+            if (g.repaired_copy) return qsTr("This is a corrected copy: its false rotations were already removed.");
+            if (!g.summary) return qsTr("No 1 kHz attitude data in this clip. Record with RockSteady and HorizonSteady off to be able to repair it.");
+            if (g.summary.bursts == 0) return qsTr("No false rotations found in this clip.");
+            if (g.unit.chip == "mp66") return qsTr("%n short single-axis jolt(s) found. With the original MP66 gyro these are usually real knocks, such as setting the drone down, so the repair is off by default.", "", g.summary.bursts);
+            return qsTr("%n false rotation(s) found in this clip, %1° in total, the largest %2°.", "", g.summary.bursts)
+                       .arg(g.summary.total_deg.toFixed(1)).arg(g.summary.largest_deg.toFixed(1));
+        }
+
+        InfoMessageSmall {
+            show: gyrogateSection.visible;
+            type: root.gyrogateRecommended? InfoMessage.Warning : InfoMessage.Info;
+            text: gyrogateSection.unitText() + "\n" + gyrogateSection.summaryText();
+        }
+        CheckBoxWithContent {
+            id: gyrogatecb;
+            text: qsTr("Remove DJI Gyrogate false rotations");
+            tooltip: qsTr("Removes the short false rotations recorded by the ICM-40609-D gyro of DJI O4 units, and the slow drift the camera adds while pulling them back. Clips without false rotations are left untouched.");
+            onCheckedChanged: {
+                controller.set_gyrogate_filter(checked, gyrogateStrength.value);
+                Qt.callLater(controller.recompute_gyro);
+            }
+            Label {
+                text: qsTr("Sensitivity");
+                width: parent.width;
+                tooltip: qsTr("Higher values also catch smaller false rotations, but may touch real fast motion. 50% is the default.");
+                SliderWithField {
+                    id: gyrogateStrength;
+                    defaultValue: 50;
+                    to: 100;
+                    value: 50;
+                    unit: "%";
+                    precision: 0;
+                    width: parent.width;
+                    onValueChanged: {
+                        controller.set_gyrogate_filter(gyrogatecb.checked, value);
+                        Qt.callLater(controller.recompute_gyro);
+                    }
+                }
+            }
+        }
+        Button {
+            text: qsTr("Save corrected copy");
+            iconName: "save";
+            // Android only hands over content URIs, not a folder to write next to the clip.
+            visible: Qt.platform.os != "android";
+            enabled: !root.gyrogateBusy && !!root.gyrogate && !!root.gyrogate.summary && !root.gyrogate.repaired_copy;
+            tooltip: qsTr("Writes a copy of the clip with the false rotations removed next to the original (%1), and uses it as the motion data. The video and audio are not changed and the original is kept.").arg("_gyrofix");
+            anchors.horizontalCenter: parent.horizontalCenter;
+            onClicked: {
+                root.gyrogateBusy = true;
+                root.gyrogateProgress = 0;
+                root.gyrogateCopyFor = window.videoArea.loadedFileUrl.toString() + "|" + root.filename;
+                controller.save_gyrogate_copy(gyrogateStrength.value);
+            }
+        }
+        BasicText {
+            visible: root.gyrogateBusy;
+            width: parent.width;
+            horizontalAlignment: Text.AlignHCenter;
+            text: qsTr("Saving the corrected copy... %1%").arg(Math.round(root.gyrogateProgress * 100));
+        }
+        Connections {
+            target: controller;
+            function onGyrogate_copy_progress(percent: real, error_string: string, url: string, report: string): void {
+                root.gyrogateProgress = percent;
+                if (percent < 1) return;
+                root.gyrogateBusy = false;
+                if (error_string) {
+                    messageBox(Modal.Error, qsTr("Could not save the corrected copy: %1").arg(error_string), [ { text: qsTr("Ok") } ]);
+                    return;
+                }
+                if (!url) {
+                    messageBox(Modal.Info, qsTr("No false rotations were found at this sensitivity, so no copy was written."), [ { text: qsTr("Ok") } ]);
+                    return;
+                }
+                const r = JSON.parse(report || "{}");
+                window.showNotification(Modal.Info, qsTr("Corrected copy saved to %1 (%n false rotation(s) removed).", "", (r.bursts || []).length).arg("<b>" + filesystem.display_url(url) + "</b>"));
+                if (root.gyrogateCopyFor != window.videoArea.loadedFileUrl.toString() + "|" + root.filename) {
+                    return; // Another clip was opened meanwhile.
+                }
+                // Use the copy as the motion data and keep everything else: the current
+                // project is reapplied with only the motion data file swapped.
+                const obj = JSON.parse(controller.export_gyroflow_data("Simple", window.getAdditionalProjectData()));
+                obj.gyro_source = obj.gyro_source || { };
+                obj.gyro_source.filepath = url;
+                // The macOS bookmark and the metadata still describe the original file and
+                // would take precedence over `filepath` on import.
+                delete obj.gyro_source.filepath_bookmark;
+                delete obj.gyro_source.file_metadata;
+                obj.gyro_source.gyrogate_filter = false;
+                window.videoArea.loadGyroflowData(obj, render_queue.editing_job_id);
             }
         }
     }

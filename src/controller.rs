@@ -215,6 +215,7 @@ pub struct Controller {
     set_imu_lpf: qt_method!(fn(&self, lpf: f64)),
     set_imu_median_filter: qt_method!(fn(&self, size: i32)),
     set_glitch_filter: qt_method!(fn(&self, enabled: bool, strength: f64)),
+    set_gyrogate_filter: qt_method!(fn(&self, enabled: bool, strength: f64)),
     set_imu_rotation: qt_method!(fn(&self, pitch_deg: f64, roll_deg: f64, yaw_deg: f64)),
     set_acc_rotation: qt_method!(fn(&self, pitch_deg: f64, roll_deg: f64, yaw_deg: f64)),
     set_imu_orientation: qt_method!(fn(&self, orientation: String)),
@@ -383,6 +384,9 @@ pub struct Controller {
 
     mp4_merge: qt_method!(fn(&self, file_list: QStringList, output_folder: QUrl, output_filename: QString)),
     mp4_merge_progress: qt_signal!(percent: f64, error_string: QString, url: QString),
+
+    save_gyrogate_copy: qt_method!(fn(&self, strength: f64)),
+    gyrogate_copy_progress: qt_signal!(percent: f64, error_string: QString, url: QString, report: QString),
 
     is_nle_installed: qt_method!(fn(&self) -> bool),
     nle_plugins: qt_method!(fn(&self, command: QString, typ: QString) -> QString),
@@ -935,6 +939,17 @@ impl Controller {
                         file_metadata.lens_params.values().any(|x| x.iris_fstop.is_some() || x.iris_tstop.is_some())
                     ));
                     additional_obj.insert("sample_rate".to_owned(),       serde_json::to_value(fpvflow_core::gyro_source::GyroSource::get_sample_rate(&*file_metadata)).unwrap());
+                    // DJI O4 units with the ICM-40609-D gyro record false rotations: say which
+                    // gyro the unit likely has and how many false bursts the clip carries.
+                    if let Some(unit) = fpvflow_core::gyrogate::unit::classify(&file_metadata.additional_data) {
+                        let summary = fpvflow_core::gyrogate::memory::analyze(&file_metadata.quaternions, &Default::default());
+                        additional_obj.insert("gyrogate".to_owned(), serde_json::json!({
+                            "unit": unit,
+                            "summary": summary,
+                            "repaired_copy": std::path::Path::new(&filesystem::get_filename(&gyro.file_url)).file_stem()
+                                .is_some_and(|stem| stem.to_string_lossy().ends_with(fpvflow_core::gyrogate::COPY_SUFFIX)),
+                        }));
+                    }
                     let has_builtin_profile = file_metadata.lens_profile.as_ref().map(|y| y.is_object()).unwrap_or_default();
                     let md_data = file_metadata.additional_data.clone();
                     if let Some(md_fps) = file_metadata.frame_rate {
@@ -1711,6 +1726,7 @@ impl Controller {
     wrap_simple_method!(set_imu_lpf, v: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_median_filter, size: i32; recompute; chart_data_changed);
     wrap_simple_method!(set_glitch_filter, enabled: bool, strength: f64; recompute; chart_data_changed);
+    wrap_simple_method!(set_gyrogate_filter, enabled: bool, strength: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_rotation, pitch_deg: f64, roll_deg: f64, yaw_deg: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_acc_rotation, pitch_deg: f64, roll_deg: f64, yaw_deg: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_orientation, v: String; recompute; chart_data_changed);
@@ -3100,6 +3116,46 @@ impl Controller {
         });
         let sdkbase = fpvflow_core::settings::get_str("sdkBase", "");
         crate::external_sdk::install(&filename, &sdkbase, progress);
+    }
+
+    /// Write `<name>_gyrofix.<ext>` next to the motion data file with the DJI Gyrogate bursts
+    /// removed. Reports through `gyrogate_copy_progress`; `report` is the JSON of
+    /// `gyrogate::file::FileRepairReport`, and `url` the copy, empty when none was written.
+    fn save_gyrogate_copy(&self, strength: f64) {
+        let src_url = self.stabilizer.gyro.read().file_url.clone();
+        let src = std::path::PathBuf::from(filesystem::url_to_path(&src_url));
+        if src_url.is_empty() || !src.is_file() {
+            self.gyrogate_copy_progress(1.0, QString::from("The motion data file was not found."), QString::default(), QString::default());
+            return;
+        }
+        let dst = fpvflow_core::gyrogate::file::corrected_copy_path(&src);
+        let dst_url = filesystem::path_to_url(&dst.to_string_lossy());
+        let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (percent, error_string, url, report): (f64, String, String, String)| {
+            this.gyrogate_copy_progress(percent, QString::from(error_string), QString::from(url), QString::from(report));
+        });
+        core::run_threaded(move || {
+            let settings = fpvflow_core::gyrogate::Settings::from_strength(strength);
+            let step = progress.clone();
+            // repair_file reports every metadata sample; forward whole percents only.
+            let last_percent = AtomicUsize::new(0);
+            let report_progress = move |p: f64| {
+                let percent = (p.min(0.99) * 100.0) as usize;
+                if last_percent.swap(percent, SeqCst) != percent {
+                    step((percent as f64 / 100.0, String::new(), String::new(), String::new()));
+                }
+            };
+            let result = fpvflow_core::gyrogate::file::repair_file(&src, &dst, &settings, report_progress, Arc::new(AtomicBool::new(false)));
+            match result {
+                Ok(report) => {
+                    let url = if report.written { dst_url } else { String::new() };
+                    progress((1.0, String::new(), url, serde_json::to_string(&report).unwrap_or_default()));
+                }
+                Err(e) => {
+                    ::log::error!("Gyrogate copy of {}: {e}", src.display());
+                    progress((1.0, e.to_string(), String::new(), String::new()));
+                }
+            }
+        });
     }
 
     fn mp4_merge(&self, file_list: QStringList, output_folder: QUrl, output_filename: QString) {
