@@ -2,6 +2,7 @@
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
 import QtQuick
+import QtQuick.Controls as QQC
 import QtQuick.Dialogs
 
 import "../components/"
@@ -151,6 +152,12 @@ MenuItem {
             root.gyrogate = additional_data.gyrogate || null;
             gyrogatecb.checked = root.gyrogateRecommended;
             controller.set_gyrogate_filter(gyrogatecb.checked, gyrogateStrength.value);
+            // Show the user that the clip has the defect and that the repair can be tuned.
+            // Not saved: the panel's own open/closed setting stays the user's choice.
+            if (is_main_video && root.gyrogateRecommended && !root.opened) {
+                root.opened = true;
+                gyrogateRevealTimer.start();
+            }
             controller.set_imu_rotation(rot.checked? p.value : 0, rot.checked? r.value : 0, rot.checked? y.value : 0);
             controller.set_acc_rotation(arot.checked? ap.value : 0, arot.checked? ar.value : 0, arot.checked? ay.value : 0);
             Qt.callLater(controller.recompute_gyro);
@@ -343,6 +350,11 @@ MenuItem {
             }
         }
     }
+    Timer {
+        id: gyrogateRevealTimer;
+        interval: 800; // After the panel's opening animation.
+        onTriggered: root.ensureVisible();
+    }
     Column {
         id: gyrogateSection;
         width: parent.width;
@@ -385,12 +397,31 @@ MenuItem {
                 controller.set_gyrogate_filter(checked, gyrogateStrength.value);
                 Qt.callLater(controller.recompute_gyro);
             }
-            Label {
-                text: qsTr("Sensitivity");
+            Column {
+                id: gyrogateSensitivity;
                 width: parent.width;
-                tooltip: qsTr("How small a false rotation can be and still be removed. A rotation counts as false when one axis jumps above the threshold for a few milliseconds while the other two stay calm.") + "\n\n" +
+                spacing: 4 * dpiScale;
+                readonly property string help: qsTr("How small a false rotation can be and still be removed. A rotation counts as false when one axis jumps above the threshold for a few milliseconds while the other two stay calm.") + "\n\n" +
                          qsTr("0%: threshold 120 °/s, only the large, obvious jolts.\n50% (default): threshold 60 °/s, tuned against Betaflight blackbox logs.\n100%: threshold 30 °/s, also small jolts, but it may mistake real knocks for false ones.") + "\n\n" +
                          qsTr("Raise it if small jolts remain in the stabilized video with the repair on. Lower it if real motion, such as a knock or an impact, looks smoothed away. The value is saved with the project and used for the corrected copy.");
+                Row {
+                    spacing: 2 * dpiScale;
+                    BasicText {
+                        leftPadding: 0;
+                        text: qsTr("Sensitivity");
+                        anchors.verticalCenter: parent.verticalCenter;
+                    }
+                    LinkButton {
+                        iconName: "question";
+                        display: QQC.Button.IconOnly;
+                        leftPadding: 3 * dpiScale;
+                        rightPadding: 3 * dpiScale;
+                        anchors.verticalCenter: parent.verticalCenter;
+                        tooltip: gyrogateSensitivity.help;
+                        // A click shows the same text, for touch screens without hover.
+                        onClicked: messageBox(Modal.Info, gyrogateSensitivity.help, [ { text: qsTr("Ok") } ]);
+                    }
+                }
                 SliderWithField {
                     id: gyrogateStrength;
                     defaultValue: 50;
