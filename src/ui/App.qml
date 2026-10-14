@@ -256,6 +256,9 @@ Rectangle {
                         text: {
                             if (addQueueDelayed) {
                                 return qsTr("Added to queue");
+                            } else if (render_queue.editing_job_id > 0) {
+                                // Editing a queued job saves it back, whatever the export mode.
+                                return qsTr("Save");
                             } else if (isAddToQueue) {
                                 return render_queue.editing_job_id > 0? qsTr("Save") : qsTr("Add to render queue");
                             } else {
@@ -397,8 +400,10 @@ Rectangle {
                                     ], undefined, Text.AutoText, "keep-in-foreground");
                                 }
 
+                                // Read before add(), which clears it once the job is saved back.
+                                const savingEditedJob = render_queue.editing_job_id > 0;
                                 const job_id = render_queue.add(window.getAdditionalProjectDataJson(), controller.image_to_b64(result.image));
-                                if (renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue || render_queue.get_active_render_count() >= render_queue.parallel_renders) {
+                                if (savingEditedJob || renderBtn.isAddToQueue || renderBtn.tempIsAddToQueue || render_queue.get_active_render_count() >= render_queue.parallel_renders) {
                                     // Add to queue
                                     renderBtn.addQueueDelayed = true;
                                     renderBtn.btn.enabled = false;
