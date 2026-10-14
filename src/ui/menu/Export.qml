@@ -140,6 +140,8 @@ MenuItem {
             export_trims_separately: exportTrimsSeparately.checked,
             audio_codec:           audioCodec.currentText,
             interpolation:         interpolationMethod.currentText,
+            // Set in the Color panel, where it belongs; travels with the job.
+            precise_color_conversion: !!(window.colorLut && window.colorLut.preciseConversion),
 
             // External audio; the `audio` flag above is still the master gate.
             external_audio_url:             controller.get_external_audio_url(),

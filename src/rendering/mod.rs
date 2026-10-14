@@ -268,6 +268,15 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         Interpolation::Bicubic  => ffmpeg_next::software::scaling::flag::Flags::BICUBIC,
        _ => ffmpeg_next::software::scaling::flag::Flags::LANCZOS,
     };
+    // Grading converts every frame to RGB and back on the CPU. Nothing is resized
+    // there, only chroma resampled, where Lanczos costs a lot of fps for little
+    // visible gain - so the fast filter is the default and the render's own filter
+    // is kept for the precise option.
+    let color_conversion_flags = if render_options.precise_color_conversion {
+        ffmpeg_interpolation
+    } else {
+        ffmpeg_next::software::scaling::flag::Flags::BILINEAR
+    };
 
     log::debug!("interpolation: {:?}", &interpolation);
     log::debug!("proc.gpu_device: {:?}", &proc.gpu_device);
@@ -803,7 +812,7 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
         if needs_rgb_for_lut {
             // Must match the plane set built above for this same flag, byte
             // order included - see the comment there on why this is LE.
-            converter.convert_pixel_format(input_frame, output_frame, Pixel::RGBA64LE, ffmpeg_interpolation, |converted_frame, converted_output| {
+            converter.convert_pixel_format(input_frame, output_frame, Pixel::RGBA64LE, color_conversion_flags, |converted_frame, converted_output| {
                 undistort_frame(converted_frame, converted_output);
             })?;
             process_frame += 1;

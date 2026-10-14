@@ -28,6 +28,8 @@ MenuItem {
 
     /// Whether a LUT is loaded. Controls the visibility of everything below the button.
     readonly property bool hasLut: !!lutInfo.text;
+    /// Read by the export settings when a job is queued.
+    property alias preciseConversion: preciseConversion.checked;
 
     /// Describes the loaded table. The core returns JSON so the wording can be
     /// translated here instead of shipping English to every language.
@@ -98,6 +100,7 @@ MenuItem {
         const out = { };
         if (url) { out.url = url; out.amount = controller.get_color_lut_amount(); }
         if (any) out.adjustments = adjustments;
+        if (url || any) out.precise_conversion = preciseConversion.checked;
         return out;
     }
 
@@ -106,6 +109,8 @@ MenuItem {
     function loadGyroflow(obj: var): void {
         const o = obj.color_lut;
         if (!o) return;
+
+        if (o.hasOwnProperty("precise_conversion")) preciseConversion.checked = !!o.precise_conversion;
 
         if (o.url) {
             controller.load_color_lut_url(o.url);
@@ -279,6 +284,19 @@ MenuItem {
             // that is no longer applied.
             library.currentIndex = 0;
         }
+    }
+
+    // Grading needs whole RGB pixels, so the export converts every frame to RGB
+    // and back on the CPU. With the render's Lanczos filter that conversion
+    // costs most of the export speed, so the fast filter is the default.
+    CheckBox {
+        id: preciseConversion;
+        text: qsTr("Precise color conversion (slower export)");
+        tooltip: qsTr("Applying the LUT or the adjustments converts every frame to RGB and back. By default this uses a fast filter; enable to use the export's interpolation method, at a large cost in render speed.");
+        checked: settings.value("preciseColorConversion", false);
+        width: parent.width;
+        onCheckedChanged: settings.setValue("preciseColorConversion", checked);
+        Component.onCompleted: contentItem.wrapMode = Text.WordWrap;
     }
 
     // ---- Adjustments ----

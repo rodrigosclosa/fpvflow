@@ -88,6 +88,9 @@ pub struct RenderOptions {
     pub export_trims_separately: bool,
     pub audio_codec: String,
     pub interpolation: String,
+    /// Converts graded frames to RGB with the render's interpolation filter
+    /// instead of the fast one. Off by default: much slower, rarely visible.
+    pub precise_color_conversion: bool,
 
     /// External audio track URL, if any. The `audio` flag above is still the master
     /// switch; when it's on and this is set, the external audio replaces the embedded one.
@@ -148,6 +151,7 @@ impl RenderOptions {
             if let Some(v) = obj.get("export_trims_separately").and_then(|x| x.as_bool()) { self.export_trims_separately = v; }
             if let Some(v) = obj.get("audio_codec")            .and_then(|x| x.as_str())  { self.audio_codec = v.to_string(); }
             if let Some(v) = obj.get("interpolation")          .and_then(|x| x.as_str())  { self.interpolation = v.to_string(); }
+            if let Some(v) = obj.get("precise_color_conversion").and_then(|x| x.as_bool()) { self.precise_color_conversion = v; }
 
             if let Some(v) = obj.get("metadata").and_then(|x| x.as_object())  {
                 if let Some(s) = v.get("comment").and_then(|x| x.as_str()) { self.metadata.comment = s.to_string(); }
