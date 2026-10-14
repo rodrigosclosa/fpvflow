@@ -141,7 +141,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: FPVFlow ${{ github.ref_name }}
+          # Bare tag: 1.0.1 parses the release title as the version.
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             artifacts/FPVFlow-*.zip
