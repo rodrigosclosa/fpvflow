@@ -60,9 +60,10 @@ project format and the [Gyroflow documentation](https://docs.gyroflow.xyz) all s
 
 ## What FPVFlow adds
 
-Two features that exist here and not upstream. Both were built for a specific problem: an FPV
+Three features that exist here and not upstream. All were built for a specific problem: an FPV
 pilot finishes a flight with log footage and a separately recorded audio track, and does not want
-a second pass through an editor just to make the file usable.
+a second pass through an editor just to make the file usable - or comes back with footage from a
+DJI O4 unit whose gyro records rotations that never happened.
 
 ### Colour grading with `.cube` LUTs
 
@@ -85,6 +86,9 @@ FPVFlow applies the LUT **during stabilization**, so the exported file is alread
   10-bit footage stays 10-bit and gradients do not band.
 - **The output is tagged Rec.709** when a LUT is loaded, so players show the converted file
   correctly instead of treating it as log.
+- **Fast exports.** The colour conversion uses a lighter chroma filter and every CPU core: a 4K
+  export with a LUT went from about 7 to about 20 fps. If you need the slower, slightly more
+  precise conversion, turn on **Precise color conversion (slower export)** in the Color panel.
 
 The adjustments work with or without a LUT loaded - exposure, contrast and vignette are useful on
 their own.
@@ -98,14 +102,54 @@ microphone at all. Lining that track up with the video is normally a manual job 
   stabilized video.
 - **The source format is preserved** losslessly where the container allows it - a 32-bit float
   recording is not silently downgraded.
-- **Auto-sync** correlates propeller vibration picked up by the microphone with the vibration the
-  gyroscope recorded, and aligns the two. It is a convenience, not a requirement: the offset can
-  always be set by hand.
-- **Waveform on the timeline**, below the gyro chart, so the alignment is visible.
+- **Auto-sync** anchors on sounds the drone makes at precise moments, so when it hears them it
+  stays accurate even with a crowd or music around:
+  - **The arming beep.** The three-tone beep the drone plays when it arms is found in the audio.
+    For a camera set to record on arm, the first frame follows the beep by a fixed delay.
+  - **The disarm.** The propellers stopping marks the last frame of a recording that stops on
+    disarm, and both ends must agree before the result is accepted.
+  - **Recordings started by hand.** When the clip starts before arming, the moment the drone
+    leaves its rest on the ground is used, cross-checked against the disarm.
+  - When none of these is available, it falls back to the older methods - pairing the take-off
+    heard in the audio with the lift-off seen in the motion data, then correlating the two
+    signals - which can be off by a second or more, so check that result by hand.
 
-> **Known limitation:** the audio is embedded on export but is **not played back in the preview**.
-> The preview player only demuxes an external track while reloading the media, which resets the
-> trim and freezes playback - so that path was removed deliberately rather than shipped broken.
+  On hand-aligned test clips it lands within 0.15 s for recordings that run from arm to disarm
+  and within about 0.5 s for recordings started by hand. It is a convenience, not a requirement:
+  the offset can always be set by hand.
+- **Plays in the preview**, aligned with the video, so the sync can be checked by ear.
+- **Waveform on the timeline**, below the gyro chart, so the alignment is visible.
+- **Kept per clip in the render queue**, together with the clip's LUT and colour adjustments.
+
+### DJI O4 "Gyrogate" repair
+
+DJI O4 Air Unit Pro units built since about February 2026, and every O4 Lite, use the TDK
+ICM-40609-D gyro. Under motor vibration it records short false rotations on a single axis - up
+to about 2° in a few milliseconds - and the camera then pulls each one back over about 12
+seconds. The raw footage looks fine, but RockSteady and Gyroflow faithfully "correct" rotations
+that never happened, so the stabilized video jerks and slowly sways. The community calls it
+*DJI Gyrogate*.
+
+FPVFlow detects and repairs it, from the motion data alone:
+
+- **Detection when the clip loads.** The Motion data panel shows which gyro the unit most likely
+  has - read from the model and from the production date encoded in the serial number - and how
+  many false rotations the clip contains.
+- **Repair in the stabilization.** *Remove DJI Gyrogate false rotations* is turned on
+  automatically when you open an affected clip, and saved with the project. It removes each false burst, adds back the camera's pull-back
+  of it, and low-passes the result. A sensitivity slider trades catching smaller bursts against
+  touching real fast motion. Clips without false rotations are left bit-for-bit untouched.
+- **Corrected copy.** *Save corrected copy* writes `<name>_gyrofix.MP4` next to the original
+  with only the attitude values rewritten - same size, video and audio untouched, the original
+  never modified - and switches the motion data to it. The copy opens like any DJI clip in
+  FPVFlow, Gyroflow or the Gyroflow plugins. On APFS (the Mac's internal drive) the copy is a
+  clone and takes almost no extra space.
+
+The repair needs the 1 kHz attitude track, so record with **RockSteady and HorizonSteady off**.
+It removes most of the false motion, not all of it; the real fix has to come from a DJI
+firmware update. The algorithm is a port of [o4fix](https://github.com/vadimbryl/o4fix) by
+vadimbryl, with ideas from [DJIFix](https://github.com/parhipov/DJIFix) and
+[djgyrofix](https://github.com/steamvogue/djgyrofix).
 
 ## Features inherited from Gyroflow
 
@@ -241,13 +285,13 @@ on is a matter of credentials, not work.
 
 ## Help and support
 
-**For FPVFlow** - the colour panel, the external audio track, or anything else specific to this
-fork - open an issue [here](https://github.com/rodrigosclosa/fpvflow/issues).
+**For FPVFlow** - the colour panel, the external audio track, the Gyrogate repair, or anything
+else specific to this fork - open an issue [here](https://github.com/rodrigosclosa/fpvflow/issues).
 
 **Please do not take FPVFlow problems to the Gyroflow project.** Their Discord and issue tracker
 are for the official application, and its maintainers did not build this fork and cannot support
 it. If you are unsure which one you are using, check the version in the app: FPVFlow shows
-"v1.0.0 · baseado no Gyroflow 1.6.3".
+"v1.0.x · baseado no Gyroflow 1.6.3".
 
 For questions about stabilization itself - lens profiles, gyro sources, synchronization - the
 [Gyroflow documentation](https://docs.gyroflow.xyz) applies unchanged and is excellent.
@@ -313,7 +357,8 @@ Currently *Gyroflow* is available in:
 
 *Gyroflow*'s own translations are managed upstream on crowdin: https://crowdin.com/project/gyroflow
 
-Strings added by this fork (the colour panel and the external audio panel) are not in that
+Strings added by this fork (the colour panel, the external audio panel and the Gyrogate section
+of the motion data panel) are not in that
 project - contributing them there would not reach FPVFlow. Open an issue here instead if you
 want to translate them.
 
