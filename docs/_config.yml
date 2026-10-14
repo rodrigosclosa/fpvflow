@@ -7,6 +7,10 @@ url: https://rodrigosclosa.github.io
 baseurl: /fpvflow
 lang: en
 
+# Google Search Console, added to every page by jekyll-seo-tag.
+webmaster_verifications:
+  google: xQz70LTA9vyGKOirIpD0EjI5fAciIfz9HEQwYuXOOkY
+
 remote_theme: just-the-docs/just-the-docs@v0.12.0
 plugins:
   - jekyll-remote-theme
