@@ -1873,6 +1873,8 @@ impl Controller {
         // the worker never touches the stabilizer or the track.
         let mono = track.mono_analysis.clone();
         let sample_rate = track.sample_rate;
+        // The whole file, trims ignored: the offset is relative to its first frame.
+        let video_duration_s = self.stabilizer.params.read().duration_ms / 1000.0;
 
         let params = FeatureParams {
             band_lo_hz: band_lo_hz as f32,
@@ -2015,7 +2017,7 @@ impl Controller {
         // The STFT runs over the whole track: seconds of work, which would freeze
         // the window if done here.
         std::thread::spawn(move || {
-            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &angular_speed, speed_rate, speed_start_s, &params));
+            finished(Self::compute_audio_sync(&mono, sample_rate, &gyro_samples, derived_from_quats, &angular_speed, speed_rate, speed_start_s, video_duration_s, &params));
         });
     }
 
@@ -2025,7 +2027,7 @@ impl Controller {
     /// `derived_from_quats` says the motion came from integrated orientations
     /// rather than a real gyroscope, which decides the method - see the comment
     /// at `use_onset` below.
-    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, angular_speed: &[f32], speed_rate: f32, speed_start_s: f64, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
+    fn compute_audio_sync(mono: &[f32], sample_rate: u32, gyro_samples: &[(f64, [f64; 3])], derived_from_quats: bool, angular_speed: &[f32], speed_rate: f32, speed_start_s: f64, video_duration_s: f64, params: &fpvflow_core::audio::features::FeatureParams) -> Option<(f64, f64, bool)> {
         use fpvflow_core::audio::features::{audio_envelope, gyro_envelope};
         use fpvflow_core::audio::sync::cross_correlate;
 
@@ -2091,57 +2093,77 @@ impl Controller {
             };
 
             // The arming beep, when the microphone caught it, beats everything
-            // below. With a camera that records on arm, the first frame comes
-            // ARM_TO_RECORDING_S after the beep, which pins the offset to about
-            // 0.1s - the take-off pairing is off by 1.5s or more, because the
-            // orientation reaches us at ~2 Hz. But recording on arm is a setting,
-            // not a rule: a recording started by hand has no relation to the beep.
-            // So the beep is only trusted when the take-off pairing, now searched
-            // after the beep instead of anywhere, roughly agrees with it.
-            if let Some(beep) = fpvflow_core::audio::takeoff::detect_arming_beep(mono, sample_rate) {
-                let after = fpvflow_core::audio::takeoff::detect_after_arming(mono, sample_rate, &beep);
-                let gyro_start_s = gyro_start.map(|(g, g_rate)| speed_start_s + g as f64 / g_rate as f64);
-                if let (Some(audio_takeoff), Some(gyro_start_s)) = (after, gyro_start_s) {
-                    // 2.5s: the take-off pairing alone was 1.7s away on the
-                    // reference clip, and a camera started by hand is usually
-                    // started well before the pilot arms.
-                    const ARM_AGREEMENT_S: f64 = 2.5;
-                    let on_arm = beep.start_seconds + fpvflow_core::audio::takeoff::ARM_TO_RECORDING_S;
-                    let by_takeoff = audio_takeoff - gyro_start_s;
-                    let agree = (on_arm - by_takeoff).abs() <= ARM_AGREEMENT_S;
+            // below. With a camera that records from arm to disarm, the first
+            // frame comes ARM_TO_RECORDING_S after the beep and the last one
+            // DISARM_TO_RECORDING_END_S after the propellers stop - two sharp
+            // marks that put the offset within ~0.1s on the reference clips.
+            // The take-off pairing below is off by 1.5s or more, and sometimes
+            // by 7s or 16s, because the orientation reaches us at ~2 Hz and a
+            // straight climb barely rotates the aircraft.
+            //
+            // Recording on arm is a setting, not a rule: a recording started by
+            // hand has no relation to the beep. The propellers stopping exactly
+            // where such a recording would end is what confirms it - the gyro is
+            // not reliable enough to.
+            use fpvflow_core::audio::takeoff::{ARM_TO_RECORDING_S, DISARM_TO_RECORDING_END_S};
+            let beep = fpvflow_core::audio::takeoff::detect_arming_beep(mono, sample_rate);
+            if let Some(beep) = beep {
+                let on_arm = beep.start_seconds + ARM_TO_RECORDING_S;
+                let expected_stop = on_arm + video_duration_s - DISARM_TO_RECORDING_END_S;
+                let stop = if video_duration_s > 0.0 {
+                    fpvflow_core::audio::takeoff::detect_props_stop_near(mono, sample_rate, expected_stop)
+                } else {
+                    None
+                };
+                // The two ends must also agree with each other: on the reference
+                // clips they did within 0.44s, while a stop found in the search
+                // window by chance does not have to.
+                const ENDS_AGREEMENT_S: f64 = 1.0;
+                let on_disarm = stop.map(|s| s + DISARM_TO_RECORDING_END_S - video_duration_s);
+                if let (Some(stop), Some(on_disarm)) = (stop, on_disarm.filter(|d| (d - on_arm).abs() <= ENDS_AGREEMENT_S)) {
+                    // Each end alone was within 0.25s on the reference clips;
+                    // their mean, within 0.1s.
+                    let offset = (on_arm + on_disarm) / 2.0;
                     ::log::info!(
-                        "Audio auto-sync [arming beep]: beep at {:.2}s ({:.0} Hz), take-off after it at {:.2}s, lift-off (gyro) at {:.2}s -> recorded on arm {:.3}s, by take-off {:.3}s, {}",
-                        beep.start_seconds, beep.freq_hz, audio_takeoff, gyro_start_s, on_arm, by_takeoff,
-                        if agree { "using the beep" } else { "recording did not start on arm, using the take-off" }
+                        "Audio auto-sync [arm to disarm]: beep at {:.2}s ({:.0} Hz) -> {:.3}s, propellers stop at {:.2}s -> {:.3}s, offset {:.3}s",
+                        beep.start_seconds, beep.freq_hz, on_arm, stop, on_disarm, offset
                     );
-                    return Some(if agree { (on_arm, 0.9, true) } else { (by_takeoff, 0.5, true) });
+                    return Some((offset, 0.95, true));
                 }
-                ::log::info!("Audio auto-sync: arming beep at {:.2}s, but no take-off to check it against (audio: {}, lift-off: {})",
-                    beep.start_seconds, after.is_some(), gyro_start_s.is_some());
+                ::log::info!(
+                    "Audio auto-sync: arming beep at {:.2}s, but the propellers do not stop near {:.2}s, where a recording from arm to disarm would end (found: {:?}) - matching the take-off instead",
+                    beep.start_seconds, expected_stop, stop
+                );
             }
 
-            let takeoff = fpvflow_core::audio::takeoff::detect(mono, sample_rate);
+            // After the beep when there is one: the beep and the idle spin that
+            // follows it are what the plain search used to take for the take-off.
+            let takeoff: Option<(f64, f32, String)> = match &beep {
+                Some(b) => fpvflow_core::audio::takeoff::detect_after_arming(mono, sample_rate, b)
+                    .map(|t| (t, 0.5, "after the arming beep".to_string())),
+                None => fpvflow_core::audio::takeoff::detect(mono, sample_rate).map(|t| (
+                    t.time_seconds,
+                    // Halved on purpose: the audio side is accurate to a fraction
+                    // of a second, but the pairing below is approximate, so high
+                    // confidence would overstate what this offset is worth.
+                    (t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 4.0)).clamp(0.0, 1.0),
+                    format!("band {:.0} Hz, sustain {:.1}x", t.band_lo_hz, t.sustain),
+                )),
+            };
 
-            if let (Some(t), Some((g, g_rate))) = (takeoff, gyro_start) {
+            if let (Some((t, confidence, how)), Some((g, g_rate))) = (&takeoff, gyro_start) {
                 let gyro_start_s = speed_start_s + g as f64 / g_rate as f64;
                 // `t_audio = t_video + offset`. Note the two instants are close
-                // but NOT identical: the audio marks the propellers starting,
-                // while the gyro only reacts once the aircraft leaves the ground,
-                // which can be seconds later. The result is therefore a good
-                // starting point rather than a final answer, and the confidence
-                // below is deliberately capped to say so.
-                let offset = t.time_seconds - gyro_start_s;
-
-                // Halved on purpose: the audio side is accurate to a fraction of
-                // a second, but the pairing above is approximate, so reporting
-                // high confidence here would overstate what this offset is worth.
-                let confidence = ((t.sustain / (fpvflow_core::audio::takeoff::MIN_SUSTAIN * 4.0)) as f32).clamp(0.0, 1.0);
-
+                // but NOT identical: the audio marks the propellers speeding up,
+                // while the gyro only reacts once the aircraft rotates, which can
+                // be seconds later. The result is therefore a good starting point
+                // rather than a final answer.
+                let offset = t - gyro_start_s;
                 ::log::info!(
-                    "Audio auto-sync [take-off]: audio at {:.2}s (band {:.0} Hz, sustain {:.1}x), lift-off (gyro) at {:.2}s -> offset {:.3}s",
-                    t.time_seconds, t.band_lo_hz, t.sustain, gyro_start_s, offset
+                    "Audio auto-sync [take-off]: audio at {:.2}s ({}), lift-off (gyro) at {:.2}s -> offset {:.3}s",
+                    t, how, gyro_start_s, offset
                 );
-                return Some((offset, confidence as f64, true));
+                return Some((offset, *confidence as f64, true));
             }
 
             // No clear take-off in one of the two signals: fall back to matching

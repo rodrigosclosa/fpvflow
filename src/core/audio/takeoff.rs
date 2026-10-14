@@ -234,10 +234,74 @@ pub struct ArmingBeep {
 /// Seconds from the start of the arming beep to the first video frame, for a
 /// camera that starts recording when the aircraft arms.
 ///
-/// Measured against hand-aligned offsets on three DJI O4 Pro clips: 0.65s,
-/// 0.76s and 0.87s. Only valid when the recording did start on arm, which the
+/// Measured against hand-aligned offsets on five DJI O4 Pro clips: 0.66s to
+/// 1.04s, mean 0.85s. Only valid when the recording did start on arm, which the
 /// caller has to check - a recording started by hand has no relation to it.
-pub const ARM_TO_RECORDING_S: f64 = 0.76;
+pub const ARM_TO_RECORDING_S: f64 = 0.85;
+
+/// Seconds from the propellers stopping (disarm) to the last video frame, for a
+/// camera that stops recording when the aircraft disarms.
+///
+/// Same five clips: 0.15s to 0.57s, mean 0.40s. The motors stop dead on disarm,
+/// a 9-21 dB drop in the blade band, so this end is as sharp as the beep.
+pub const DISARM_TO_RECORDING_END_S: f64 = 0.40;
+
+/// The propellers stopping near `expected_s`, in seconds from the start of the
+/// audio, or `None` if the blade noise does not drop there.
+///
+/// Searched only around where the recording is expected to end, not over the
+/// whole clip: a freestyle flight cuts the throttle many times, and the search
+/// window is what tells the final stop from those. Used to confirm that a
+/// recording ran from arm to disarm - see [`ARM_TO_RECORDING_S`].
+pub fn detect_props_stop_near(mono: &[f32], sample_rate: u32, expected_s: f64) -> Option<f64> {
+    // How far from the expected stop the drop may be, and how much the level
+    // must fall. The five reference clips dropped 12-21 dB; event recordings
+    // with the drone far away went as low as 6 dB.
+    const EARLY_S: f64 = 4.0;
+    const LATE_S: f64 = 3.0;
+    const MIN_DROP_DB: f32 = 6.0;
+    // Median windows on each side of a candidate.
+    const SIDE_S: f64 = 2.0;
+
+    if sample_rate == 0 {
+        return None;
+    }
+    let sr = sample_rate as f64;
+    let from_s = (expected_s - EARLY_S - SIDE_S).max(0.0);
+    let to_s = (expected_s + LATE_S + SIDE_S).min(mono.len() as f64 / sr);
+    if to_s - from_s < SIDE_S * 2.0 + 1.0 {
+        return None;
+    }
+    let slice = &mono[(from_s * sr) as usize..(to_s * sr) as usize];
+    let mut level = band_envelope_excluding(slice, sample_rate, 1200.0, 8000.0f32.min(sample_rate as f32 / 2.0 * 0.9), -1000.0);
+    // A quarter of a second, so a single dip between two blade passes does
+    // not count as the stop.
+    smooth(&mut level, (ENVELOPE_RATE_HZ / 4.0) as usize);
+    let db: Vec<f32> = level.iter().map(|v| 10.0 * (v + 1e-20).log10()).collect();
+
+    let rate = ENVELOPE_RATE_HZ as f64;
+    let side = (SIDE_S * rate) as usize;
+    let first = ((expected_s - EARLY_S - from_s) * rate).max(side as f64) as usize;
+    let last = (((expected_s + LATE_S - from_s) * rate) as usize).min(db.len().saturating_sub(side));
+    let mut best: Option<(usize, f32)> = None;
+    for i in first..last {
+        let drop = median(&db[i - side..i]) - median(&db[i..i + side]);
+        if best.map_or(true, |(_, d)| drop > d) {
+            best = Some((i, drop));
+        }
+    }
+    let (i, drop) = best?;
+    if drop < MIN_DROP_DB {
+        return None;
+    }
+    // The stop is where the level crosses halfway between the two sides.
+    let mid = (median(&db[i - side..i]) + median(&db[i..i + side])) / 2.0;
+    let half = side / 2;
+    let stop = (i.saturating_sub(half)..(i + half).min(db.len()))
+        .find(|&j| db[j] < mid)
+        .unwrap_or(i);
+    Some(from_s + stop as f64 / rate)
+}
 
 /// The beep is searched in the first two minutes: it precedes the take-off, and
 /// further in, the propellers' own tones are the only thing that could match.
