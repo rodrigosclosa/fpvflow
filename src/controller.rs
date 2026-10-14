@@ -2385,7 +2385,10 @@ impl Controller {
                                 if let Some(name) = name {
                                     ::log::info!("Latest version: {}, current version: {}", name, util::get_version());
 
-                                    if let Ok(latest_version) = semver::Version::parse(name.trim_start_matches('v')) {
+                                    // The tag, not the title: releases are titled "FPVFlow v1.0.1",
+                                    // which never parses, so no update was ever offered.
+                                    let tag = obj.get("tag_name").and_then(|x| x.as_str()).unwrap_or(name);
+                                    if let Ok(latest_version) = semver::Version::parse(tag.trim_start_matches('v')) {
                                         if let Ok(this_version) = semver::Version::parse(env!("CARGO_PKG_VERSION")) {
                                             if latest_version > this_version {
                                                 update((name.to_owned(), body.unwrap_or_default().to_owned()));
