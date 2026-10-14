@@ -9,7 +9,7 @@
   </h1>
 
   <p align="center">
-    Gyroflow melhorado para pilotos de FPV
+    Gyroflow enhanced for FPV pilots
     <br/>
     <em>Video stabilization using gyroscope data, with colour grading and external audio built in</em>
     <br/>
@@ -296,7 +296,7 @@ else specific to this fork - open an issue [here](https://github.com/rodrigosclo
 **Please do not take FPVFlow problems to the Gyroflow project.** Their Discord and issue tracker
 are for the official application, and its maintainers did not build this fork and cannot support
 it. If you are unsure which one you are using, check the version in the app: FPVFlow shows
-"v1.0.x · baseado no Gyroflow 1.6.3".
+"v1.0.x · based on Gyroflow 1.6.3".
 
 For questions about stabilization itself - lens profiles, gyro sources, synchronization - the
 [Gyroflow documentation](https://docs.gyroflow.xyz) applies unchanged and is excellent.

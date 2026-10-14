@@ -109,7 +109,7 @@ FPVFlow is a fork of Gyroflow 1.6.3. The stabilization engine, the lens profile 
 - [Colour grading with `.cube` LUTs]({{ '/colour-grading.html' | relative_url }}) applied during the export
 - An [external audio track]({{ '/external-audio.html' | relative_url }}) with automatic synchronization
 
-FPVFlow numbers its own versions from 1.0.0. To see which app you are running, check the version in the app: FPVFlow shows "v1.0.x · baseado no Gyroflow 1.6.3". Both apps can be installed side by side and share lens profiles and preferences.
+FPVFlow numbers its own versions from 1.0.0. To see which app you are running, check the version in the app: FPVFlow shows "v1.0.x · based on Gyroflow 1.6.3". Both apps can be installed side by side and share lens profiles and preferences.
 
 FPVFlow is built for Windows, macOS and Linux only. On Android and iOS, use Gyroflow.
 

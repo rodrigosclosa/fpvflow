@@ -111,7 +111,7 @@ If donations ever cover the certificates, signing is the first thing they go to,
 
 FPVFlow and Gyroflow can be installed side by side. FPVFlow reads lens profiles and preferences from the same directory Gyroflow uses, so an existing Gyroflow setup carries over.
 
-To check which app you are running, look at the version shown in the app: FPVFlow shows "v1.0.x · baseado no Gyroflow 1.6.3".
+To check which app you are running, look at the version shown in the app: FPVFlow shows "v1.0.x · based on Gyroflow 1.6.3".
 
 ## Updating
 
