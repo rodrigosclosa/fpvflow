@@ -197,6 +197,55 @@ pub fn first_sustained_rise(envelope: &[f32], smooth_window: usize, threshold_fr
 /// those is a physical quantity, and all of them fired seconds late on the
 /// reference clip.
 pub fn lift_off(speed: &[f32], rate: f32) -> Option<usize> {
+    lift_off_from(speed, rate, ground_floor(speed), 0)
+}
+
+/// Each take-off that follows the aircraft resting on the ground for at least
+/// [`REST_S`], as `(rest start, lift-off)` indices.
+///
+/// For a recording started by hand: the pilot carries the aircraft into place,
+/// and those swings pass for a lift-off in [`lift_off`] - on five such clips it
+/// fired 2-19s before the real one. What tells the two apart is the pause in
+/// between: armed on the ground, the aircraft sits still for 5-12s before it
+/// lifts, while a carried one never stops for that long.
+pub fn lift_offs_after_rest(speed: &[f32], rate: f32) -> Vec<(usize, usize)> {
+    let floor = ground_floor(speed);
+    let moving = floor * LIFT_OFF_MOVING;
+    let rest = (REST_S * rate) as usize;
+    let mut found = Vec::new();
+    let mut start = 0;
+    for i in 0..speed.len() {
+        if speed[i] < moving {
+            continue;
+        }
+        // `start..i` is still; the motion starting at `i` must be a lift-off.
+        if i - start >= rest {
+            if let Some(j) = lift_off_from(speed, rate, floor, i).filter(|&j| j == i) {
+                found.push((start, j));
+            }
+        }
+        start = i + 1;
+    }
+    found
+}
+
+/// Seconds of stillness that set a lift-off apart from the aircraft being
+/// carried: the shortest pre-flight pause on the reference clips was 5.5s, the
+/// longest stop while carrying, 3.5s at the very start of a clip.
+pub const REST_S: f32 = 4.0;
+
+/// The ground floor of the angular speed: what it drifts at while resting.
+fn ground_floor(speed: &[f32]) -> f32 {
+    if speed.is_empty() {
+        return 1e-3;
+    }
+    let mut sorted: Vec<f32> = speed.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted[speed.len() / 10].max(1e-3)
+}
+
+/// [`lift_off`] searched from index `from`, against a given ground floor.
+fn lift_off_from(speed: &[f32], rate: f32, floor: f32, from: usize) -> Option<usize> {
     let n = speed.len();
     let stay = (LIFT_OFF_STAY_S * rate) as usize;
     let hold = (LIFT_OFF_HOLD_S * rate) as usize;
@@ -209,16 +258,11 @@ pub fn lift_off(speed: &[f32], rate: f32) -> Option<usize> {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
     };
-    let floor = {
-        let mut sorted: Vec<f32> = speed.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        sorted[n / 10].max(1e-3)
-    };
     let rise = floor * LIFT_OFF_RISE;
     let moving = floor * LIFT_OFF_MOVING;
     let sustained = floor * LIFT_OFF_SUSTAIN;
 
-    for j in 0..n - stay {
+    for j in from..n - stay {
         if speed[j] < rise {
             continue;
         }
@@ -229,7 +273,7 @@ pub fn lift_off(speed: &[f32], rate: f32) -> Option<usize> {
             continue;
         }
         let mut k = j;
-        while k > 0 && speed[k - 1] >= moving {
+        while k > from && speed[k - 1] >= moving {
             k -= 1;
         }
         return Some(k);
@@ -298,6 +342,18 @@ mod tests {
     fn a_noisier_camera_is_measured_against_its_own_floor() {
         let speed = flight(1200, 5.0, 400, 60.0, Some(370));
         assert_eq!(lift_off(&speed, 20.0), Some(400));
+    }
+
+    #[test]
+    fn a_carried_aircraft_lifts_off_after_resting() {
+        // Carried with swings for 6s, a 1s stop, more swings, then 8s at rest on
+        // the ground and the flight.
+        let mut speed = vec![1.0f32; 1200];
+        speed[20..140].fill(80.0);
+        speed[160..240].fill(80.0);
+        speed[400..].fill(40.0);
+        assert_eq!(lift_off(&speed, 20.0), Some(20));
+        assert_eq!(lift_offs_after_rest(&speed, 20.0).last(), Some(&(240, 400)));
     }
 
     #[test]

@@ -2115,10 +2115,20 @@ impl Controller {
                 } else {
                     None
                 };
+                // The last stop of the propellers after the beep, the disarm -
+                // when it stands out from the background.
+                let final_stop = if video_duration_s > 0.0 {
+                    fpvflow_core::audio::takeoff::detect_final_props_stop(mono, sample_rate, beep.end_seconds)
+                } else {
+                    None
+                };
                 // The two ends must also agree with each other: on the reference
                 // clips they did within 0.44s, while a stop found in the search
-                // window by chance does not have to.
+                // window by chance does not have to. Nor may that stop be another
+                // one than the disarm: in 0082, started by hand, a 18 dB dip of
+                // the ambient noise sat right where an on-arm recording would end.
                 const ENDS_AGREEMENT_S: f64 = 1.0;
+                let stop = stop.filter(|s| final_stop.map_or(true, |f| (f - s).abs() <= ENDS_AGREEMENT_S));
                 let on_disarm = stop.map(|s| s + DISARM_TO_RECORDING_END_S - video_duration_s);
                 if let (Some(stop), Some(on_disarm)) = (stop, on_disarm.filter(|d| (d - on_arm).abs() <= ENDS_AGREEMENT_S)) {
                     // Each end alone was within 0.25s on the reference clips;
@@ -2130,9 +2140,53 @@ impl Controller {
                     );
                     return Some((offset, 0.95, true));
                 }
+                // Not recorded from arm, so started by hand. The aircraft was
+                // then carried into place, set down, and armed while resting on
+                // the ground: the lift-off is the end of that rest, and the beep
+                // falls inside it. Of the rests followed by a lift-off, the
+                // longest one holding the beep - a pause while carrying can hold
+                // it too, under a wrong offset, but is shorter. Within 0.15-1.15s
+                // on five clips started by hand.
+                let after_arming = fpvflow_core::audio::takeoff::detect_after_arming(mono, sample_rate, &beep);
+                let on_rest = after_arming.and_then(|t| {
+                    let at = |i: usize| speed_start_s + i as f64 / speed_rate as f64;
+                    fpvflow_core::audio::sync::lift_offs_after_rest(angular_speed, speed_rate)
+                        .into_iter()
+                        .map(|(rest, lift)| (at(rest), at(lift), t - at(lift)))
+                        .filter(|&(rest, lift, offset)| (rest..=lift).contains(&(beep.start_seconds - offset)))
+                        .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+                        .map(|(rest, lift, offset)| (t, rest, lift, offset))
+                });
+                // Such a recording often still stops on disarm, so the end can
+                // anchor it too: the last stop of the propellers, after the beep.
+                // It holds only if the beep then falls inside the recording, and
+                // if the rest agrees - in 0085 the recording was stopped by hand
+                // 5s before the disarm, and only the rest told.
+                const REST_AGREEMENT_S: f64 = 1.5;
+                if let Some(final_stop) = final_stop {
+                    let on_disarm = final_stop + DISARM_TO_RECORDING_END_S - video_duration_s;
+                    let beep_in_video = beep.start_seconds - on_disarm;
+                    let agrees = on_rest.map_or(true, |(_, _, _, offset)| (offset - on_disarm).abs() <= REST_AGREEMENT_S);
+                    if beep_in_video >= 0.0 && beep_in_video < video_duration_s && agrees {
+                        ::log::info!(
+                            "Audio auto-sync [disarm]: recording not started on arm (beep at {:.2}s, its end expected near {:.2}s); propellers stop at {:.2}s -> offset {:.3}s, arming {:.2}s into the video (rest: {:?})",
+                            beep.start_seconds, expected_stop, final_stop, on_disarm, beep_in_video, on_rest.map(|r| r.3)
+                        );
+                        // Lower than both ends: one end only, and a recording
+                        // also stopped by hand would put it off unnoticed.
+                        return Some((on_disarm, 0.7, true));
+                    }
+                }
+                if let Some((t, rest, lift, offset)) = on_rest {
+                    ::log::info!(
+                        "Audio auto-sync [rest]: beep at {:.2}s, take-off (audio) at {:.2}s; at rest (gyro) from {:.2}s, lift-off at {:.2}s -> offset {:.3}s (last stop: {:?})",
+                        beep.start_seconds, t, rest, lift, offset, final_stop
+                    );
+                    return Some((offset, 0.6, true));
+                }
                 ::log::info!(
-                    "Audio auto-sync: arming beep at {:.2}s, but the propellers do not stop near {:.2}s, where a recording from arm to disarm would end (found: {:?}) - matching the take-off instead",
-                    beep.start_seconds, expected_stop, stop
+                    "Audio auto-sync: arming beep at {:.2}s, but the recording neither starts on arm nor ends on disarm (stop near {:.2}s: {:?}, last stop: {:?}) - matching the take-off instead",
+                    beep.start_seconds, expected_stop, stop, final_stop
                 );
             }
 

@@ -246,6 +246,53 @@ pub const ARM_TO_RECORDING_S: f64 = 0.85;
 /// a 9-21 dB drop in the blade band, so this end is as sharp as the beep.
 pub const DISARM_TO_RECORDING_END_S: f64 = 0.40;
 
+/// The final stop of the propellers - the disarm at the end of the flight - in
+/// seconds from the start of the audio, searched after `from_s`.
+///
+/// For a recording started by hand that still stops on disarm: there the beep
+/// says nothing about the first frame, but the last frame still follows the
+/// stop by [`DISARM_TO_RECORDING_END_S`]. The stop is the largest drop in the
+/// blade band, which in a flight is the landing - throttle cuts in the air are
+/// over before a two-second median notices them.
+pub fn detect_final_props_stop(mono: &[f32], sample_rate: u32, from_s: f64) -> Option<f64> {
+    // Larger than near an expected point, since nothing else narrows the search:
+    // the reference disarms dropped 12-33 dB.
+    const MIN_DROP_DB: f32 = 10.0;
+    const SIDE_S: f64 = 2.0;
+    if sample_rate == 0 {
+        return None;
+    }
+    let sr = sample_rate as f64;
+    let from = ((from_s.max(0.0)) * sr) as usize;
+    if from >= mono.len() {
+        return None;
+    }
+    let mut level = band_envelope_excluding(&mono[from..], sample_rate, 1200.0, 8000.0f32.min(sample_rate as f32 / 2.0 * 0.9), -1000.0);
+    smooth(&mut level, (ENVELOPE_RATE_HZ / 4.0) as usize);
+    let db: Vec<f32> = level.iter().map(|v| 10.0 * (v + 1e-20).log10()).collect();
+    let side = (SIDE_S * ENVELOPE_RATE_HZ as f64) as usize;
+    if db.len() < side * 2 + 1 {
+        return None;
+    }
+    let mut best: Option<(usize, f32)> = None;
+    for i in side..db.len() - side {
+        let drop = median(&db[i - side..i]) - median(&db[i..i + side]);
+        if best.map_or(true, |(_, d)| drop > d) {
+            best = Some((i, drop));
+        }
+    }
+    let (i, drop) = best?;
+    if drop < MIN_DROP_DB {
+        return None;
+    }
+    let mid = (median(&db[i - side..i]) + median(&db[i..i + side])) / 2.0;
+    let half = side / 2;
+    let stop = (i.saturating_sub(half)..(i + half).min(db.len()))
+        .find(|&j| db[j] < mid)
+        .unwrap_or(i);
+    Some(from_s.max(0.0) + stop as f64 / ENVELOPE_RATE_HZ as f64)
+}
+
 /// The propellers stopping near `expected_s`, in seconds from the start of the
 /// audio, or `None` if the blade noise does not drop there.
 ///
@@ -316,12 +363,14 @@ const BEEP_MIN_CONTRAST_DB: f32 = 12.0;
 /// pulses too, but none this clean on the test set.
 const BEEP_MEAN_CONTRAST_DB: f32 = 18.0;
 const BEEP_PULSE_MIN_S: f32 = 0.15;
-const BEEP_PULSE_MAX_S: f32 = 0.8;
-/// Nominal pulse length: a pulse this long counts as one, twice as long as two
-/// (the gap between them was not resolved).
+const BEEP_PULSE_MAX_S: f32 = 1.2;
+/// Nominal pulse length: a pulse this long counts as one, twice or three times
+/// as long as two or three (the gaps between them were not resolved).
 const BEEP_PULSE_S: f32 = 0.33;
 const BEEP_MAX_GAP_S: f32 = 0.15;
 const BEEP_MIN_PULSES: usize = 3;
+/// How far a pulse may be from a whole number of nominal lengths.
+const BEEP_PULSE_TOLERANCE_S: f32 = 0.085;
 
 /// Finds the arming beep: the FIRST run of three pure-tone pulses at the same
 /// frequency. The first, not the cleanest: later in a recording the propellers
@@ -420,9 +469,20 @@ pub fn detect_arming_beep(mono: &[f32], sample_rate: u32) -> Option<ArmingBeep> 
                     continue;
                 }
             }
+            // Every pulse lasts one nominal length, or two or three when the
+            // gaps between them were not resolved - 0.31-0.34s, 0.63-0.69s or
+            // ~1.0s on all the real beeps. A propeller tone in flight that happened to sit still
+            // made pulses of 0.24s and 0.52s, and this is what rejects it.
             let len_s = (p.to - p.from) as f32 * BEEP_HOP_S;
-            count += ((len_s / BEEP_PULSE_S).round() as usize).max(1);
+            let n = (len_s / BEEP_PULSE_S).round();
+            if !(1.0..=3.0).contains(&n) || (len_s - n * BEEP_PULSE_S).abs() > BEEP_PULSE_TOLERANCE_S {
+                break;
+            }
+            count += n as usize;
             last = p;
+            if count >= BEEP_MIN_PULSES {
+                break;
+            }
         }
         if count < BEEP_MIN_PULSES {
             continue;
