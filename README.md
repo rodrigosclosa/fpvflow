@@ -87,8 +87,9 @@ FPVFlow applies the LUT **during stabilization**, so the exported file is alread
 - **The output is tagged Rec.709** when a LUT is loaded, so players show the converted file
   correctly instead of treating it as log.
 - **Fast exports.** The colour conversion uses a lighter chroma filter and every CPU core: a 4K
-  export with a LUT went from about 7 to about 20 fps. If you need the slower, slightly more
-  precise conversion, turn on **Precise color conversion (slower export)** in the Color panel.
+  export with a LUT went from about 7 to about 30 fps on a Mac with an M4 Pro. If you need the
+  slower, slightly more precise conversion, turn on **Precise color conversion (slower export)**
+  in the Color panel.
 
 The adjustments work with or without a LUT loaded - exposure, contrast and vignette are useful on
 their own.
