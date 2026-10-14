@@ -188,6 +188,13 @@ description: >-
   .dl .os { font-size: 20px; font-weight: 700; }
   .dl .file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--muted); }
   .dl .card .btn { margin-top: auto; justify-content: center; }
+  .mac-note {
+    display: none; max-width: 760px; margin: 18px auto 0; padding: 14px 18px; text-align: left;
+    border-radius: 12px; border: 1px solid rgba(251, 191, 36, 0.35); background: rgba(251, 191, 36, 0.08);
+    color: var(--text); font-size: 14px;
+  }
+  .mac-note b { color: var(--warn); }
+  .mac-note.show { display: block; }
   .dl-note { margin-top: 22px; color: var(--muted); font-size: 14px; text-align: center; }
 
   /* Footer */
@@ -240,6 +247,12 @@ description: >-
         <a class="btn btn-ghost" href="{{ '/docs/' | relative_url }}">Read the docs</a>
       </div>
       <p class="cta-note">Free and open source (GPL-3.0) - Windows, macOS and Linux</p>
+      <div class="mac-note">
+        <b>First launch on macOS:</b> FPVFlow is not signed by Apple, so macOS blocks it the first time.
+        Open <b>System Settings &rarr; Privacy &amp; Security</b>, scroll to <i>Security</i> and click
+        <b>Open Anyway</b> next to "FPVFlow was blocked". You only need to do this once.
+        <a href="{{ '/installation.html#macos' | relative_url }}">Step-by-step guide</a>
+      </div>
       <div class="shot">
         <img src="{{ '/assets/images/screenshot.png' | relative_url }}" alt="FPVFlow main window with a stabilized FPV clip, the timeline and the settings panels" width="2567" height="1381">
       </div>
@@ -403,6 +416,7 @@ description: >-
           <div class="os">macOS</div>
           <div class="file">FPVFlow-mac-universal.zip</div>
           <p>macOS 10.15 or later, Apple Silicon and Intel. Unzip and drag <code>FPVFlow.app</code> to Applications.</p>
+          <p>First launch: <b>System Settings &rarr; Privacy &amp; Security &rarr; Open Anyway</b>. <a href="{{ '/installation.html#macos' | relative_url }}">How</a></p>
           <a class="btn btn-primary" href="https://github.com/rodrigosclosa/fpvflow/releases/latest/download/FPVFlow-mac-universal.zip">Download for macOS</a>
         </div>
         <div class="card" data-os="linux">
@@ -412,6 +426,12 @@ description: >-
           <a class="btn btn-primary" href="https://github.com/rodrigosclosa/fpvflow/releases/latest/download/FPVFlow-linux64.AppImage">Download for Linux</a>
         </div>
       </div>
+<div class="mac-note">
+      <b>First launch on macOS:</b> FPVFlow is not signed by Apple, so macOS blocks it the first time.
+      Open <b>System Settings &rarr; Privacy &amp; Security</b>, scroll to <i>Security</i> and click
+      <b>Open Anyway</b> next to "FPVFlow was blocked". You only need to do this once.
+      <a href="{{ '/installation.html#macos' | relative_url }}">Step-by-step guide</a>
+    </div>
       <p class="dl-note">
         The builds are not code-signed, so the first launch needs one extra step on Windows and macOS -
         see the <a href="{{ '/installation.html' | relative_url }}">installation guide</a>.
@@ -454,6 +474,9 @@ description: >-
     var ua = navigator.userAgent.toLowerCase();
     var os = /mac/.test(ua) && !/iphone|ipad/.test(ua) ? "mac" : /win/.test(ua) ? "windows" : /linux/.test(ua) && !/android/.test(ua) ? "linux" : null;
     if (!os) return;
+    if (os === "mac") {
+      document.querySelectorAll(".mac-note").forEach(function (el) { el.classList.add("show"); });
+    }
     var card = document.querySelector('.dl .card[data-os="' + os + '"]');
     if (!card) return;
     card.classList.add("recommended");
