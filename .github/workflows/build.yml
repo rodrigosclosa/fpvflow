@@ -16,6 +16,12 @@ on:
         description: 'Publish a draft release with the artifacts'
         type: boolean
         default: false
+  # Used by nightly.yml to build another branch without publishing a release.
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
 
 jobs:
   build:
@@ -30,6 +36,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

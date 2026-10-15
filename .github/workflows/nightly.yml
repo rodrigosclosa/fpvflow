@@ -1,0 +1,74 @@
+name: Nightly
+
+# Builds a branch for beta testers and publishes it as the rolling "nightly"
+# pre-release, replacing the previous one. Run by hand only.
+#
+# Every FPVFlow version skips pre-releases when checking for updates, so regular
+# users are never offered a nightly. The tag "nightly" does not match "v*", so
+# it does not trigger build.yml either.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch to build'
+        type: string
+        default: integrate-upstream
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ inputs.ref }}
+
+  publish:
+    name: Publish nightly
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REF: ${{ inputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          sha=$(git rev-parse HEAD)
+          base=$(git describe --tags --abbrev=0 --match 'v*')
+          {
+            echo "**Beta build, not a stable release.** It may have bugs the stable version does not. Report problems in the issues and include the version shown in the app."
+            echo
+            echo "Branch \`$REF\`, commit [\`${sha:0:8}\`](https://github.com/${{ github.repository }}/commit/$sha), build #${{ github.run_number }}."
+            echo "The app shows the version as \`$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2) (gh${{ github.run_number }})\`."
+            echo
+            echo "macOS and Windows warnings on first launch are the same as for the stable releases: see the latest release notes."
+            echo
+            echo "## Changes since $base"
+            echo
+            git log --first-parent --format='- %s (%h)' "$base..HEAD"
+          } > notes.md
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+
+      - name: Replace the nightly release
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly \
+            --target "$SHA" \
+            --prerelease --latest=false \
+            --title "Nightly" \
+            --notes-file notes.md \
+            artifacts/FPVFlow-*
