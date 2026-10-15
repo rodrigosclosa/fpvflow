@@ -37,7 +37,7 @@ MenuItem {
         property alias maxZoom: maxZoomSlider.value;
         property alias maxZoomIterations: maxZoomIterations.value;
         property alias focalLengthSmoothingEnabled: flEnable.cb.checked;
-        property alias focalLengthSmoothingStrength: flStrength.value;
+        property alias focalLengthMaxZoomRate: flMaxZoomRate.value;
 
         Component.onCompleted: settings.init(sett);
         function propChanged() { settings.propChanged(sett); }
@@ -107,8 +107,8 @@ MenuItem {
             if (stab.hasOwnProperty("focal_length_smoothing_enabled")) {
                 flEnable.cb.checked = !!stab.focal_length_smoothing_enabled;
             }
-            if (stab.hasOwnProperty("focal_length_smoothing_strength")) {
-                flStrength.value = +stab.focal_length_smoothing_strength;
+            if (stab.hasOwnProperty("focal_length_max_zoom_rate")) {
+                flMaxZoomRate.value = +stab.focal_length_max_zoom_rate;
             }
 
             const hasKeyframes = typeof obj.keyframes === "object" && obj.keyframes !== null;
@@ -128,26 +128,13 @@ MenuItem {
                 horizonPitchSlider.value = lockPitchCb.checked? +stab.horizon_lock_pitch : 0;
             }
 
-            const turnThresholdValue  = stab.turn_threshold      !== undefined ? +stab.turn_threshold      : 5.0;
-            const turnSmoothMsValue   = stab.turn_smoothing_ms   !== undefined ? +stab.turn_smoothing_ms   : 500.0;
-            const turnMultiplierValue = stab.turn_multiplier     !== undefined ? +stab.turn_multiplier     : 1.0;
+            turnThresholdSlider.value  = stab.turn_threshold    != null ? +stab.turn_threshold    : 5.0;
+            turnSmoothnessSlider.value = stab.turn_smoothing_ms != null ? +stab.turn_smoothing_ms : 500.0;
+            turnMultiplierSlider.value = stab.turn_multiplier   != null ? +stab.turn_multiplier   : 1.0;
 
-            turnThreshold  = turnThresholdValue;
-            turnSmoothMs   = turnSmoothMsValue;
-            turnMultiplier = turnMultiplierValue;
-
-            // Keep corresponding sliders (if present) in sync with the loaded values
-            if (typeof turnThresholdSlider  !== "undefined" && turnThresholdSlider)  turnThresholdSlider.value  = turnThresholdValue;
-            if (typeof turnSmoothMsSlider   !== "undefined" && turnSmoothMsSlider)   turnSmoothMsSlider.value   = turnSmoothMsValue;
-            if (typeof turnMultiplierSlider !== "undefined" && turnMultiplierSlider) turnMultiplierSlider.value = turnMultiplierValue;
-
-            if (stab.tilt_accel_limit !== undefined && +stab.tilt_accel_limit < Infinity) {
-                tiltAccelLimitCb.checked = true;
-                tiltAccelLimit = +stab.tilt_accel_limit;
-            } else {
-                tiltAccelLimitCb.checked = false;
-                tiltAccelLimit = Infinity;
-            }
+            // A missing or null `tilt_accel_limit` means no limit
+            tiltAccelLimitCb.checked = stab.tilt_accel_limit != null && +stab.tilt_accel_limit < Infinity;
+            if (tiltAccelLimitCb.checked) tiltAccelLimitSlider.value = +stab.tilt_accel_limit;
 
             autoLockCb.checked = !!stab.automatic_lock;
             horizonSlider.enabled = !autoLockCb.checked;
@@ -191,19 +178,13 @@ MenuItem {
         return traverseChildren(smoothingOptions, "param-" + name);
     }
 
-    property real turnThreshold: 5.0  // Roll rate threshold (°/s) for horizon tilt
-    property real turnSmoothMs: 500.0 // EMA smoothing time constant in ms
-    property real turnMultiplier: 1.0 // Multiplier applied to dynamic tilt (1x default)
-    property real tiltAccelLimit: Infinity // Tilt acceleration/deceleration limit (°/s²)
-
-
     function updateHorizonLock(): void {
         const lockAmount = horizonCb.checked? (autoLockCb.checked ? 100.0 : horizonSlider.value) : 0.0;
         const roll = horizonCb.checked? horizonRollSlider.value : 0.0;
         const pitch = horizonCb.checked && lockPitchCb.checked? horizonPitchSlider.value : 0.0;
         const lockPitch = horizonCb.checked && lockPitchCb.checked;
-        const accelLimit = tiltAccelLimitCb.checked ? tiltAccelLimit : Infinity;
-        controller.set_horizon_lock(lockAmount, roll, lockPitch, pitch, autoLockCb.checked, turnThreshold, turnSmoothMs, turnMultiplier, accelLimit);
+        const accelLimit = tiltAccelLimitCb.checked ? tiltAccelLimitSlider.value : Infinity;
+        controller.set_horizon_lock(lockAmount, roll, lockPitch, pitch, autoLockCb.checked, turnThresholdSlider.value, turnSmoothnessSlider.value, turnMultiplierSlider.value, accelLimit);
         controller.set_use_gravity_vectors(useGravityVectors.checked);
         controller.set_horizon_lock_integration_method(integrationMethod.currentIndex);
     }
@@ -437,6 +418,9 @@ MenuItem {
             id: lockPitchCb;
             text: qsTr("Lock pitch angle");
             checked: false;
+            // The gravity vector horizon lock only levels the roll
+            unavailable: controller.has_gravity_vectors && useGravityVectors.checked;
+            tooltip: unavailable? qsTr("Pitch locking is not available when using gravity vectors.") : "";
             onCheckedChanged: Qt.callLater(updateHorizonLock);
         }
 
@@ -445,6 +429,7 @@ MenuItem {
             spacing: 2 * dpiScale;
             text: qsTr("Pitch angle correction");
             visible: lockPitchCb.checked;
+            enabled: !lockPitchCb.unavailable;
             SliderWithField {
                 id: horizonPitchSlider;
                 width: parent.width;
@@ -506,10 +491,7 @@ MenuItem {
                     unit: qsTr("°/s");
                     precision: 1;
                     value: 5.0;
-                    onValueChanged: {
-                        turnThreshold = value;
-                        Qt.callLater(updateHorizonLock);
-                    }
+                    onValueChanged: Qt.callLater(updateHorizonLock);
                 }
             }
 
@@ -527,10 +509,7 @@ MenuItem {
                     unit: qsTr("ms");
                     precision: 0;
                     value: 500.0;
-                    onValueChanged: {
-                        turnSmoothMs = value;
-                        Qt.callLater(updateHorizonLock);
-                    }
+                    onValueChanged: Qt.callLater(updateHorizonLock);
                 }
             }
 
@@ -548,10 +527,7 @@ MenuItem {
                     unit: "x";
                     precision: 2;
                     value: 1.0;
-                    onValueChanged: {
-                        turnMultiplier = value;
-                        Qt.callLater(updateHorizonLock);
-                    }
+                    onValueChanged: Qt.callLater(updateHorizonLock);
                 }
             }
 
@@ -575,10 +551,7 @@ MenuItem {
                         unit: qsTr("°/s²");
                         precision: 1;
                         value: 3.0;
-                        onValueChanged: {
-                            tiltAccelLimit = value;
-                            Qt.callLater(updateHorizonLock);
-                        }
+                        onValueChanged: Qt.callLater(updateHorizonLock);
                     }
                 }
             }
@@ -697,24 +670,29 @@ MenuItem {
         id: flEnable;
         text: qsTr("Stabilize focal length");
         visible: controller.has_per_frame_focal_length;
-
+        tooltip: qsTr("Limits how fast the picture may zoom when the lens metadata records a changing focal length.") + "\n" +
+                 qsTr("Zooms slower than the limit pass through untouched. Faster zooms are spread out by cropping ahead of a zoom-in and after a zoom-out. Lower values give a smoother zoom and more crop.");
         cb.checked: controller.focal_length_smoothing_enabled;
-        cb.onCheckedChanged: controller.focal_length_smoothing_enabled = cb.checked;
+        cb.onCheckedChanged: {
+            controller.focal_length_smoothing_enabled = cb.checked;
+            // Show the focal length curves on the chart, so the effect of this setting can be seen
+            if (cb.checked) window.videoArea?.timeline?.setFocalLengthVisible(true);
+        }
 
         Label {
-            text: qsTr("Smoothness");
+            text: qsTr("Max zoom speed");
             position: Label.LeftPosition;
             SliderWithField {
-                id: flStrength;
-                from: 0;
-                to: 100;
-                precision: 1;
+                id: flMaxZoomRate;
+                from: 5;
+                to: 200;
+                unit: "%/s";
+                precision: 0;
                 scaler: 100.0;
-                unit: "%";
                 width: parent.width;
-                value: controller.focal_length_smoothing_strength;
-                defaultValue: 30.0;
-                onValueChanged: controller.focal_length_smoothing_strength = value;
+                value: controller.focal_length_max_zoom_rate;
+                defaultValue: 50;
+                onValueChanged: controller.focal_length_max_zoom_rate = value;
             }
         }
     }

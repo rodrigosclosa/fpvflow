@@ -50,8 +50,11 @@ pub struct KernelParams {
     pub k1:                Vec4, // 16 - distortion coefficients
     pub k2:                Vec4, // 16 - distortion coefficients
     pub k3:                Vec4, // 16 - distortion coefficients
+    pub k4:                Vec4, // 16 - distortion coefficients
+    pub k5:                Vec4, // 16 - distortion coefficients
+    pub k6:                Vec4, // 16 - distortion coefficients
     pub fov:               f32, // 4
-    pub r_limit:           f32, // 8
+    pub field_limit:       f32, // 8 - the largest ray angle the lens model can be asked for, in radians
     pub lens_correction_amount:   f32, // 12
     pub input_vertical_stretch:   f32, // 16
     pub input_horizontal_stretch: f32, // 4
@@ -75,8 +78,8 @@ pub struct KernelParams {
     pub pixel_value_limit:        f32, // 16
     pub light_refraction_coefficient: f32, // 4
     pub plane_index:              i32, // 8
-    pub lut_amount:               f32, // 12 - color LUT strength, 0..1
-    pub reserved2:                f32, // 16
+    pub output_projection:        i32, // 12
+    pub lut_amount:               f32, // 16 - color LUT strength, 0..1
     pub ewa_coeffs_p:             Vec4, // 16
     pub ewa_coeffs_q:             Vec4, // 16
     pub color_adjust1:            Vec4, // 16 - exposure, luminance, contrast, highlights

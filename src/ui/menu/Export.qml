@@ -603,10 +603,11 @@ MenuItem {
                 id: audioCodec;
                 // PCM (f32le) preserves 32-bit float audio (DJI Mic and similar) losslessly,
                 // but only fits in MOV/MKV.
-                model: ["AAC", "PCM (s16le)", "PCM (s16be)", "PCM (s24le)", "PCM (s24be)", "PCM (f32le)"];
+                model: ["AAC", "PCM (s16le)", "PCM (s16be)", "PCM (s24le)", "PCM (s24be)", "PCM (f32le)", "Copy"];
                 font.pixelSize: 12 * dpiScale;
                 width: parent.width;
                 currentIndex: 0;
+                tooltip: qsTr("\"Copy\" keeps the original audio track without re-encoding it.\nIf the output file format can't store the original audio codec (e.g. PCM in .mp4), it will be encoded to AAC.");
 
                 // Once the user picks a codec, that choice wins: importing another
                 // track must not silently undo it.

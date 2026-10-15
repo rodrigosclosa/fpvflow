@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use itertools::{Either, Itertools};
+use itertools::Itertools;
 use qmetaobject::*;
 use nalgebra::Vector4;
 use std::sync::Arc;
 use std::cell::RefCell;
-use std::sync::atomic::{ AtomicBool, AtomicUsize, Ordering::SeqCst };
+use std::sync::atomic::{ AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst };
 use std::collections::{ BTreeMap, BTreeSet, HashSet };
 use std::str::FromStr;
 
@@ -16,7 +16,7 @@ use crate::core;
 use crate::core::StabilizationManager;
 #[cfg(feature = "opencv")]
 use crate::core::calibration::LensCalibrator;
-use crate::core::synchronization::AutosyncProcess;
+use crate::core::synchronization::{ AutosyncError, AutosyncProcess, AutosyncResult };
 use crate::core::stabilization::KernelParamsFlags;
 use crate::core::synchronization;
 use crate::core::keyframes::*;
@@ -140,6 +140,7 @@ pub struct Controller {
     update_frequency_graph: qt_method!(fn(&self, graph: QJSValue, idx: usize, ts: f64, sr: f64, fft_size: usize)),
     update_keyframes_view: qt_method!(fn(&self, kfview: QJSValue)),
     rolling_shutter_estimated: qt_signal!(rolling_shutter: f64),
+    lens_delay_estimated: qt_signal!(delay_frames: i32, correlation: f64),
     estimate_bias: qt_method!(fn(&self, timestamp_fract: QString)),
     bias_estimated: qt_signal!(bx: f64, by: f64, bz: f64),
     orientation_guessed: qt_signal!(orientation: QString),
@@ -214,13 +215,30 @@ pub struct Controller {
     set_sync_lpf: qt_method!(fn(&self, lpf: f64)),
     set_imu_lpf: qt_method!(fn(&self, lpf: f64)),
     set_imu_median_filter: qt_method!(fn(&self, size: i32)),
-    set_glitch_filter: qt_method!(fn(&self, enabled: bool, strength: f64)),
     set_gyrogate_filter: qt_method!(fn(&self, enabled: bool, strength: f64)),
     set_imu_rotation: qt_method!(fn(&self, pitch_deg: f64, roll_deg: f64, yaw_deg: f64)),
     set_acc_rotation: qt_method!(fn(&self, pitch_deg: f64, roll_deg: f64, yaw_deg: f64)),
     set_imu_orientation: qt_method!(fn(&self, orientation: String)),
     set_imu_bias: qt_method!(fn(&self, bx: f64, by: f64, bz: f64)),
     recompute_gyro: qt_method!(fn(&self)),
+
+    analyze_optically: qt_method!(fn(&mut self)),
+    set_optical_correction_enabled: qt_method!(fn(&self, enabled: bool)),
+    clear_optical_correction: qt_method!(fn(&mut self)),
+    set_ignore_file_motion: qt_method!(fn(&mut self, ignore: bool)),
+    set_optical_correction_strength: qt_method!(fn(&mut self, strength: f64)),
+    set_optical_correction_per_frame: qt_method!(fn(&mut self, per_frame: bool)),
+    set_optical_tracking: qt_method!(fn(&mut self, method: String)),
+    optical_correction_info: qt_method!(fn(&self) -> QString),
+    optical_correction_changed: qt_signal!(),
+    optical_tracked_points: qt_method!(fn(&self, timestamp_us: f64, stabilized: bool) -> QString),
+    find_optical_tracks_in_rect: qt_method!(fn(&self, timestamp_us: f64, x0: f64, y0: f64, x1: f64, y1: f64, all_frames: bool, stabilized: bool) -> u32),
+    cancel_optical_track_search: qt_method!(fn(&self)),
+    optical_tracks_found: qt_signal!(search: u32, ids: QString),
+    optical_track_paths: qt_method!(fn(&self, ids: String, timestamp_us: f64, reach: usize, stabilized: bool) -> QString),
+    remove_optical_tracks: qt_method!(fn(&mut self, ids: String, remove: bool) -> QString),
+    restore_optical_tracks: qt_method!(fn(&mut self)),
+    optical_tracks_changed: qt_signal!(),
 
     override_video_fps: qt_method!(fn(&self, fps: f64, recompute: bool)),
     get_org_duration_ms: qt_method!(fn(&self) -> f64),
@@ -246,7 +264,11 @@ pub struct Controller {
     zooming_method: qt_property!(i32; WRITE set_zooming_method),
 
     focal_length_smoothing_enabled: qt_property!(bool; READ get_focal_length_smoothing_enabled WRITE set_focal_length_smoothing_enabled),
-    focal_length_smoothing_strength: qt_property!(f64; READ get_focal_length_smoothing_strength WRITE set_focal_length_smoothing_strength),
+    focal_length_max_zoom_rate: qt_property!(f64; READ get_focal_length_max_zoom_rate WRITE set_focal_length_max_zoom_rate),
+    lens_metadata_delay_frames: qt_property!(i32; READ get_lens_metadata_delay_frames WRITE set_lens_metadata_delay_frames NOTIFY lens_metadata_delay_changed),
+    lens_metadata_delay_changed: qt_signal!(),
+    has_lens_breathing: qt_property!(bool; READ has_lens_breathing NOTIFY gyro_changed),
+    lens_breathing_enabled: qt_property!(bool; READ get_lens_breathing_enabled WRITE set_lens_breathing_enabled),
 
     additional_rotation_x: qt_property!(f64; WRITE set_additional_rotation_x),
     additional_rotation_y: qt_property!(f64; WRITE set_additional_rotation_y),
@@ -336,6 +358,8 @@ pub struct Controller {
 
     check_updates: qt_method!(fn(&self)),
     updates_available: qt_signal!(version: QString, changelog: QString),
+    check_server_message: qt_method!(fn(&self)),
+    server_message: qt_signal!(json: QString),
     rate_profile: qt_method!(fn(&self, name: QString, json: QString, checksum: QString, is_good: bool)),
     request_profile_ratings: qt_method!(fn(&self)),
 
@@ -416,9 +440,20 @@ pub struct Controller {
     processing_info_changed: qt_signal!(),
 
     cancel_flag: Arc<AtomicBool>,
+    // Loading telemetry has its own: the other operations reset the shared one when they start, and a load has to stay
+    // cancelled once a newer one replaced it. Results of a replaced load are dropped, see `begin_telemetry_load`
+    telemetry_cancel_flag: Arc<AtomicBool>,
+    telemetry_load_id: Arc<AtomicUsize>,
+    // Telemetry loads clear and write the motion data and lens of the stabilizer, so they run one after another
+    telemetry_queue: util::SerialQueue,
     preview_pipeline: Arc<AtomicUsize>,
 
     ongoing_computations: BTreeSet<u64>,
+    optical_analysis_running: bool,
+    /// The last of `find_optical_tracks_in_rect`'s searches: the ones before it stop
+    optical_track_search: Arc<AtomicU32>,
+    /// `remeasure_optical_correction`s running
+    optical_remeasures: usize,
 
     /// External audio track imported by the user.
     ///
@@ -511,13 +546,18 @@ impl Controller {
     }
 
     fn start_autosync(&mut self, timestamps_fract: String, sync_params: String, mode: String) {
+        if mode == "synchronize" && !self.stabilizer.gyro.read().has_motion() {
+            // Nothing to synchronize: the motion comes from the video itself, and the optical analysis measures it
+            // (per row, parallax aside) far better than the pose estimation of the sync points did
+            return self.analyze_optically();
+        }
         rendering::clear_log();
 
         let sync_params = serde_json::from_str(&sync_params) as serde_json::Result<synchronization::SyncParams>;
         if let Err(e) = sync_params {
             self.sync_in_progress = false;
             self.sync_in_progress_changed();
-            return self.error(QString::from("An error occured: %1"), QString::from(format!("JSON parse error: {}", e)), QString::default());
+            return self.error(QString::from("An error occurred: %1"), QString::from(format!("JSON parse error: {}", e)), QString::default());
         }
         let mut sync_params = sync_params.unwrap();
 
@@ -527,6 +567,10 @@ impl Controller {
         sync_params.every_nth_frame     = sync_params.every_nth_frame.max(1);
 
         let for_rs = mode == "estimate_rolling_shutter";
+        let for_lens_delay = mode == "estimate_lens_delay";
+        if for_lens_delay {
+            sync_params.every_nth_frame = 1; // consecutive frames are what the estimate tracks
+        }
 
         let every_nth_frame = sync_params.every_nth_frame;
 
@@ -577,6 +621,20 @@ impl Controller {
             ::log::info!("Setting orientation {}", &orientation);
             this.orientation_guessed(QString::from(orientation));
         });
+        let set_lens_delay = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, estimate: Option<(i32, f64, f64)>| {
+            if let Some((delay_frames, exact, correlation)) = estimate {
+                ::log::info!("Lens metadata delay estimated at {delay_frames} frames ({exact:.2} exact, correlation {correlation:.2})");
+                this.stabilizer.params.write().lens_metadata_delay_frames = delay_frames;
+                this.lens_metadata_delay_changed();
+                this.lens_delay_estimated(delay_frames, correlation);
+            } else {
+                ::log::warn!("Lens metadata delay could not be estimated");
+                this.lens_delay_estimated(0, 0.0);
+            }
+            this.sync_in_progress = false;
+            this.sync_in_progress_changed();
+            this.request_recompute();
+        });
         let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, (msg, mut arg): (String, String)| {
             arg.push_str("\n\n");
             arg.push_str(&rendering::get_log());
@@ -592,83 +650,136 @@ impl Controller {
 
         self.cancel_flag.store(false, SeqCst);
 
-        if let Ok(mut sync) = AutosyncProcess::from_manager(&self.stabilizer, &timestamps_fract, sync_params, mode, self.cancel_flag.clone()) {
+        let stabilizer = self.stabilizer.clone();
+        let cancel_flag = self.cancel_flag.clone();
+        let input_file = self.stabilizer.input_file.read().clone();
+        let proc_height = self.processing_resolution;
+        let gpu_decoding = self.stabilizer.gpu_decoding.load(SeqCst);
+        // The process is set up in the worker: picking the frames for the lens delay extracts the focal length
+        // curve of the whole clip
+        core::run_threaded(move || {
+            let mut sync = match AutosyncProcess::from_manager(&stabilizer, &timestamps_fract, sync_params, mode, cancel_flag.clone()) {
+                Ok(sync) => sync,
+                // No zoom to measure on: the same outcome as an analysis that found none, with its own message
+                Err(AutosyncError::NoZoomInMetadata) => return set_lens_delay(None),
+                Err(AutosyncError::InvalidParameters) => return err(("An error occurred: %1".to_string(), "Invalid parameters".to_string())),
+            };
             sync.on_progress(move |percent, ready, total| {
                 progress((percent, ready, total));
             });
             sync.on_finished(move |arg| {
                 match arg {
-                    Either::Left(offsets) => set_offsets(offsets),
-                    Either::Right(Some(orientation)) => set_orientation(orientation.0),
-                    _=> ()
+                    AutosyncResult::Offsets(offsets) => set_offsets(offsets),
+                    AutosyncResult::Orientation(Some(orientation)) => set_orientation(orientation.0),
+                    AutosyncResult::LensDelay(estimate) => set_lens_delay(estimate.map(|e| (e.delay_frames, e.delay_frames_exact, e.correlation))),
+                    _ => ()
                 };
             });
 
             let ranges = sync.get_ranges();
-            let cancel_flag = self.cancel_flag.clone();
+            let mut frame_no = 0;
+            let mut abs_frame_no = 0;
 
-            let input_file = self.stabilizer.input_file.read().clone();
-            let proc_height = self.processing_resolution;
-            let gpu_decoding = self.stabilizer.gpu_decoding.load(SeqCst);
-            core::run_threaded(move || {
-                let mut frame_no = 0;
-                let mut abs_frame_no = 0;
+            let mut decoder_options = ffmpeg_next::Dictionary::new();
+            if input_file.image_sequence_fps > 0.0 {
+                let fps = rendering::fps_to_rational(input_file.image_sequence_fps);
+                decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
+            }
+            if input_file.image_sequence_start > 0 {
+                decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
+            }
+            if proc_height > 0 {
+                decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
+            }
+            ::log::debug!("Decoder options: {:?}", decoder_options);
 
-                let mut decoder_options = ffmpeg_next::Dictionary::new();
-                if input_file.image_sequence_fps > 0.0 {
-                    let fps = rendering::fps_to_rational(input_file.image_sequence_fps);
-                    decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
-                }
-                if input_file.image_sequence_start > 0 {
-                    decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
-                }
-                if proc_height > 0 {
-                    decoder_options.set("scale", &format!("{}x{}", (proc_height * 16) / 9, proc_height));
-                }
-                ::log::debug!("Decoder options: {:?}", decoder_options);
+            let sync = std::rc::Rc::new(sync);
 
-                let sync = std::rc::Rc::new(sync);
+            match VideoProcessor::from_file(&input_file.url, gpu_decoding, 0, Some(decoder_options)) {
+                Ok(mut proc) => {
+                    let err2 = err.clone();
+                    let sync2 = sync.clone();
+                    proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
+                        assert!(_output_frame.is_none());
 
-                match VideoProcessor::from_file(&input_file.url, gpu_decoding, 0, Some(decoder_options)) {
-                    Ok(mut proc) => {
-                        let err2 = err.clone();
-                        let sync2 = sync.clone();
-                        proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
-                            assert!(_output_frame.is_none());
+                        if abs_frame_no % every_nth_frame == 0 {
+                            let h = if proc_height > 0 { proc_height as u32 } else { input_frame.height() };
+                            let ratio = input_frame.height() as f64 / h as f64;
+                            let sw = (input_frame.width() as f64 / ratio).round() as u32;
+                            let sh = (input_frame.height() as f64 / (input_frame.width() as f64 / sw as f64)).round() as u32;
+                            match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, sw, sh) {
+                                Ok(small_frame) => {
+                                    let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
 
-                            if abs_frame_no % every_nth_frame == 0 {
-                                let h = if proc_height > 0 { proc_height as u32 } else { input_frame.height() };
-                                let ratio = input_frame.height() as f64 / h as f64;
-                                let sw = (input_frame.width() as f64 / ratio).round() as u32;
-                                let sh = (input_frame.height() as f64 / (input_frame.width() as f64 / sw as f64)).round() as u32;
-                                match converter.scale(input_frame, ffmpeg_next::format::Pixel::GRAY8, sw, sh) {
-                                    Ok(small_frame) => {
-                                        let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
-
-                                        sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
-                                    },
-                                    Err(e) => {
-                                        err2(("An error occured: %1".to_string(), e.to_string()))
-                                    }
+                                    sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
+                                },
+                                Err(e) => {
+                                    err2(("An error occurred: %1".to_string(), e.to_string()))
                                 }
-                                frame_no += 1;
                             }
-                            abs_frame_no += 1;
-                            Ok(())
-                        });
-                        if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
-                            err(("An error occured: %1".to_string(), e.to_string()));
+                            frame_no += 1;
                         }
-                        sync.finished_feeding_frames();
+                        abs_frame_no += 1;
+                        Ok(())
+                    });
+                    if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
+                        err(("An error occurred: %1".to_string(), e.to_string()));
                     }
-                    Err(error) => {
-                        err(("An error occured: %1".to_string(), error.to_string()));
-                    }
-                };
-            });
-        } else {
-            err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));
-        }
+                    sync.finished_feeding_frames();
+                }
+                Err(error) => {
+                    err(("An error occurred: %1".to_string(), error.to_string()));
+                }
+            };
+        });
+    }
+
+    /// "Analyze image optically": tracks every frame of the trim ranges (the whole clip without any) and measures the
+    /// correction of the motion data, see `synchronization::optical_motion`. Reports progress like the synchronization does
+    fn analyze_optically(&mut self) {
+        // One at a time: Auto sync on a file without motion data comes here too, and the timeline can start it while
+        // an analysis runs
+        if self.optical_analysis_running { return; }
+        self.optical_analysis_running = true;
+        rendering::clear_log();
+
+        self.sync_in_progress = true;
+        self.sync_in_progress_changed();
+        self.sync_progress(0.0, 0, 0);
+        self.cancel_flag.store(false, SeqCst);
+
+        let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, (percent, ready, total): (f64, usize, usize)| {
+            this.sync_progress(percent, ready, total);
+        });
+        let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, result: Result<(), String>| {
+            this.optical_analysis_running = false;
+            this.sync_in_progress = false;
+            this.sync_in_progress_changed();
+            this.sync_progress(1.0, 0, 0);
+            match result {
+                Ok(()) => {
+                    this.stabilizer.invalidate_zooming();
+                    this.request_recompute();
+                    this.chart_data_changed();
+                },
+                Err(e) if e == "Cancelled" => { },
+                Err(e) => {
+                    let mut arg = e;
+                    arg.push_str("\n\n");
+                    arg.push_str(&rendering::get_log());
+                    this.error(QString::from("An error occurred: %1"), QString::from(arg), QString::default());
+                }
+            }
+            this.optical_correction_changed();
+            this.optical_tracks_changed();
+        });
+
+        let stabilizer = self.stabilizer.clone();
+        let cancel_flag = self.cancel_flag.clone();
+        core::run_threaded(move || {
+            // Fitted with the strength set here too, so a long clip's fit doesn't hold up the UI
+            finished(rendering::analyze_optically(&stabilizer, cancel_flag, None, move |percent, ready, total| progress((percent, ready, total))));
+        });
     }
 
     fn estimate_bias(&mut self, timestamps_fract: QString) {
@@ -840,24 +951,29 @@ impl Controller {
             let fps = vid.frameRate;
             let frame_count = vid.frameCount as usize;
             let video_size = (vid.videoWidth as usize, vid.videoHeight as usize);
-            self.cancel_flag.store(false, SeqCst);
-            let cancel_flag = self.cancel_flag.clone();
+            let (load_id, cancel_flag) = self.begin_telemetry_load();
+            let current_load_id = self.telemetry_load_id.clone();
+            // A project import this load replaced can't reset it anymore (its results are dropped), and nothing else is loading now
+            self.stabilizer.prevent_recompute.store(false, SeqCst);
 
             if is_main_video {
                 self.set_preview_resolution(self.preview_resolution, player);
             }
 
-            let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, (msg, arg): (String, String)| {
+            let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (msg, arg): (String, String)| {
+                if this.telemetry_load_id.load(SeqCst) != load_id { return; }
                 this.error(QString::from(msg), QString::from(arg), QString::default());
             });
 
             let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, progress: f64| {
+                if this.telemetry_load_id.load(SeqCst) != load_id { return; }
                 this.loading_gyro_in_progress = progress < 1.0;
                 this.loading_gyro_progress(progress);
                 this.loading_gyro_in_progress_changed();
             });
             let stab2 = stab.clone();
             let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, params: (bool, QString, QString, bool, serde_json::Value)| {
+                if this.telemetry_load_id.load(SeqCst) != load_id { return; }
                 this.gyro_loaded = params.3; // Contains motion
                 this.gyro_changed();
 
@@ -875,9 +991,11 @@ impl Controller {
                 this.request_recompute();
             });
             let load_lens = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, path: String| {
+                if this.telemetry_load_id.load(SeqCst) != load_id { return; }
                 this.load_lens_profile(path.into());
             });
             let reload_lens = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, _| {
+                if this.telemetry_load_id.load(SeqCst) != load_id { return; }
                 let lens = this.stabilizer.lens.read();
                 if this.lens_loaded || !lens.path_to_file.is_empty() {
                     this.lens_loaded = true;
@@ -895,7 +1013,11 @@ impl Controller {
 
                 self.loading_gyro_in_progress = true;
                 self.loading_gyro_in_progress_changed();
-                core::run_threaded(move || {
+                self.telemetry_queue.run(move || {
+                    // Replaced by a newer load while it waited for the previous one
+                    if current_load_id.load(SeqCst) != load_id { return; }
+                    let load_cancel_flag = cancel_flag.clone();
+
                     let mut additional_data = serde_json::Value::Object(serde_json::Map::new());
                     let additional_obj = additional_data.as_object_mut().unwrap();
 
@@ -913,11 +1035,13 @@ impl Controller {
                                 }
 
                                 if let Err(e) = stab.load_gyro_data(file.get_file(), filesize, &url, is_main_video, &load_options, progress, cancel_flag) {
-                                    err(("An error occured: %1".to_string(), e.to_string()));
+                                    err(("An error occurred: %1".to_string(), e.to_string()));
                                 }
                             }
                         }
                     }
+
+                    if current_load_id.load(SeqCst) != load_id { return; }
 
                     stab.recompute_smoothness();
 
@@ -927,6 +1051,8 @@ impl Controller {
                     let has_raw_gyro = !file_metadata.raw_imu.is_empty();
                     let has_quats = !file_metadata.quaternions.is_empty();
                     let has_motion = has_raw_gyro || has_quats;
+                    // Cancelled, it didn't load anything: the UI must not take the file as loaded and skip loading it again
+                    additional_obj.insert("cancelled".to_owned(),         serde_json::Value::Bool(load_cancel_flag.load(SeqCst)));
                     additional_obj.insert("imu_orientation".to_owned(),   serde_json::Value::String(gyro.imu_transforms.imu_orientation.clone().unwrap_or_else(|| "XYZ".into())));
                     additional_obj.insert("contains_raw_gyro".to_owned(), serde_json::Value::Bool(has_raw_gyro));
                     additional_obj.insert("contains_quats".to_owned(),    serde_json::Value::Bool(has_quats));
@@ -990,13 +1116,17 @@ impl Controller {
 
                     finished((is_main_video, filename.into(), QString::from(detected.trim()), has_motion, additional_data));
                 });
+            } else if self.loading_gyro_in_progress {
+                // The load this one replaced won't report that it finished anymore
+                self.loading_gyro_in_progress = false;
+                self.loading_gyro_in_progress_changed();
             }
         }
     }
     fn load_lens_profile(&mut self, url_or_id: QString) {
         let (json, filepath, checksum) = {
             if let Err(e) = self.stabilizer.load_lens_profile(&url_or_id.to_string()) {
-                self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
             }
             let lens = self.stabilizer.lens.read();
             (lens.get_json().unwrap_or_default(), lens.path_to_file.clone(), lens.checksum.clone().unwrap_or_default())
@@ -1474,6 +1604,9 @@ impl Controller {
 
     fn recompute_threaded(&mut self) {
         if self.stabilizer.params.read().duration_ms <= 0.0 { return; }
+        // The recompute brings the optical correction up to date with the sync, the lens and the frame timing, which
+        // may switch it on or off
+        let optical_applied = self.stabilizer.gyro.read().optical_correction_applied;
         let id = self.stabilizer.recompute_threaded(util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, (id, _discarded): (u64, bool)| {
             if !this.ongoing_computations.contains(&id) {
                 ::log::error!("Unknown compute_id: {}", id);
@@ -1486,10 +1619,31 @@ impl Controller {
         self.ongoing_computations.insert(id);
 
         self.compute_progress(id, 0.0);
+
+        if self.stabilizer.gyro.read().optical_correction_applied != optical_applied {
+            self.chart_data_changed();
+            self.optical_correction_changed();
+        }
+        // Tracks taken out (or put back) while the analysis was out of date, and now it isn't: measured now, or they'd
+        // look taken out of a correction that still has them
+        if self.optical_remeasures == 0 && self.stabilizer.optical_tracks_unmeasured() {
+            self.remeasure_optical_correction();
+        }
     }
 
     fn cancel_current_operation(&mut self) {
         self.cancel_flag.store(true, SeqCst);
+        self.telemetry_cancel_flag.store(true, SeqCst);
+    }
+
+    /// Cancels the telemetry load in progress, if any, and returns the id and cancel flag of a new one.
+    /// Clicking through videos while they load used to run the loads at the same time, and whichever finished last
+    /// wrote its motion data and lens, even of a video that was no longer loaded. Now only the latest load's progress
+    /// and results reach the UI and the stabilizer, and the loads run one after another (see `telemetry_queue`).
+    fn begin_telemetry_load(&mut self) -> (usize, Arc<AtomicBool>) {
+        self.telemetry_cancel_flag.store(true, SeqCst);
+        self.telemetry_cancel_flag = Arc::new(AtomicBool::new(false));
+        (self.telemetry_load_id.fetch_add(1, SeqCst) + 1, self.telemetry_cancel_flag.clone())
     }
 
     fn export_gyroflow_file(&self, url: QUrl, typ: QString, additional_data: QJsonObject) {
@@ -1505,7 +1659,7 @@ impl Controller {
             match res {
                 "ok" => this.message(QString::from("Gyroflow file exported to %1."), QString::from(format!("<b>{}</b>", filesystem::display_url(&arg))), QString::default(), QString::from("gyroflow-exported")),
                 "location" => this.request_location(QString::from(arg), typ_str.clone()),
-                "err" => this.error(QString::from("An error occured: %1"), QString::from(arg), QString::default()),
+                "err" => this.error(QString::from("An error occurred: %1"), QString::from(arg), QString::default()),
                 _ => { }
             }
             this.request_recompute();
@@ -1599,12 +1753,16 @@ impl Controller {
 
     fn import_gyroflow_file(&mut self, url: QUrl) {
         let url = util::qurl_to_encoded(url);
+        let (load_id, cancel_flag) = self.begin_telemetry_load();
+        let current_load_id = self.telemetry_load_id.clone();
         let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, progress: f64| {
+            if this.telemetry_load_id.load(SeqCst) != load_id { return; }
             this.loading_gyro_in_progress = progress < 1.0;
             this.loading_gyro_progress(progress);
             this.loading_gyro_in_progress_changed();
         });
         let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, fpvflow_core::GyroflowCoreError>| {
+            if this.telemetry_load_id.load(SeqCst) != load_id { return; }
             this.loading_gyro_in_progress = false;
             this.loading_gyro_progress(1.0);
             this.loading_gyro_in_progress_changed();
@@ -1615,24 +1773,23 @@ impl Controller {
         });
 
         let stab = self.stabilizer.clone();
-        let cancel_flag = self.cancel_flag.clone();
-        cancel_flag.store(true, SeqCst);
-        core::run_threaded(move || {
-            if Arc::strong_count(&cancel_flag) > 2 {
-                // Wait for other tasks to finish
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            cancel_flag.store(false, SeqCst);
+        self.cancel_flag.store(true, SeqCst); // Other operations still running on the previous project
+        self.telemetry_queue.run(move || {
+            if current_load_id.load(SeqCst) != load_id { return; } // Replaced by a newer load while it waited
             finished(stab.import_gyroflow_file(&url, false, progress, cancel_flag, false));
         });
     }
     fn import_gyroflow_data(&mut self, data: QString) {
+        let (load_id, cancel_flag) = self.begin_telemetry_load();
+        let current_load_id = self.telemetry_load_id.clone();
         let progress = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, progress: f64| {
+            if this.telemetry_load_id.load(SeqCst) != load_id { return; }
             this.loading_gyro_in_progress = progress < 1.0;
             this.loading_gyro_progress(progress);
             this.loading_gyro_in_progress_changed();
         });
         let finished = util::qt_queued_callback_mut(QPointer::from(self as &Self), move |this, obj: Result<serde_json::Value, fpvflow_core::GyroflowCoreError>| {
+            if this.telemetry_load_id.load(SeqCst) != load_id { return; }
             this.loading_gyro_in_progress = false;
             this.loading_gyro_progress(1.0);
             this.loading_gyro_in_progress_changed();
@@ -1642,14 +1799,9 @@ impl Controller {
         });
 
         let stab = self.stabilizer.clone();
-        let cancel_flag = self.cancel_flag.clone();
-        cancel_flag.store(true, SeqCst);
-        core::run_threaded(move || {
-            if Arc::strong_count(&cancel_flag) > 2 {
-                // Wait for other tasks to finish
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            cancel_flag.store(false, SeqCst);
+        self.cancel_flag.store(true, SeqCst); // Other operations still running on the previous project
+        self.telemetry_queue.run(move || {
+            if current_load_id.load(SeqCst) != load_id { return; } // Replaced by a newer load while it waited
             let mut is_preset = false;
             finished(stab.import_gyroflow_data(data.to_string().as_bytes(), false, None, progress, cancel_flag, &mut is_preset, false));
         });
@@ -1670,7 +1822,7 @@ impl Controller {
                 util::serde_json_to_qt_object(&thin_obj)
             },
             Err(e) => {
-                self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
                 QJsonObject::default()
             }
         }
@@ -1725,7 +1877,6 @@ impl Controller {
 
     wrap_simple_method!(set_imu_lpf, v: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_median_filter, size: i32; recompute; chart_data_changed);
-    wrap_simple_method!(set_glitch_filter, enabled: bool, strength: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_gyrogate_filter, enabled: bool, strength: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_rotation, pitch_deg: f64, roll_deg: f64, yaw_deg: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_acc_rotation, pitch_deg: f64, roll_deg: f64, yaw_deg: f64; recompute; chart_data_changed);
@@ -1733,6 +1884,141 @@ impl Controller {
     wrap_simple_method!(set_sync_lpf, v: f64; recompute; chart_data_changed);
     wrap_simple_method!(set_imu_bias, bx: f64, by: f64, bz: f64; recompute; chart_data_changed);
     wrap_simple_method!(recompute_gyro,; recompute; chart_data_changed);
+    wrap_simple_method!(set_optical_correction_enabled, enabled: bool; recompute; chart_data_changed);
+
+    fn clear_optical_correction(&mut self) {
+        self.stabilizer.clear_optical_correction();
+        self.request_recompute();
+        self.chart_data_changed();
+        self.optical_correction_changed();
+        self.optical_tracks_changed();
+    }
+    /// Sets the file's own motion data aside, for the motion measured from the video, or brings it back
+    fn set_ignore_file_motion(&mut self, ignore: bool) {
+        if self.stabilizer.set_ignore_file_motion(ignore) {
+            self.stabilizer.invalidate_zooming();
+            self.request_recompute();
+            self.update_offset_model();
+            self.optical_correction_changed();
+        }
+    }
+    fn set_optical_correction_strength(&mut self, strength: f64) {
+        let refit = self.stabilizer.set_optical_correction_strength(strength);
+        self.refit_optical_correction(refit);
+    }
+    fn set_optical_correction_per_frame(&mut self, per_frame: bool) {
+        let refit = self.stabilizer.set_optical_correction_per_frame(per_frame);
+        self.refit_optical_correction(refit);
+    }
+    /// "klt" or "dis", for the next analysis
+    fn set_optical_tracking(&mut self, method: String) {
+        if self.stabilizer.set_optical_tracking(&method) {
+            self.optical_correction_changed();
+        }
+    }
+    /// Refits the correction to the measurements of the last analysis after a change of its settings, when they're
+    /// still around (`refit`): a fraction of a second, off the UI thread
+    fn refit_optical_correction(&mut self, refit: bool) {
+        if !refit {
+            return self.optical_correction_changed();
+        }
+        let done = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, result: Result<bool, String>| {
+            match result {
+                Ok(true) => {
+                    this.stabilizer.invalidate_zooming();
+                    this.request_recompute();
+                    this.chart_data_changed();
+                },
+                Ok(false) => { },
+                Err(e) => this.error(QString::from("An error occurred: %1"), QString::from(e), QString::default()),
+            }
+            this.optical_correction_changed();
+        });
+        let stabilizer = self.stabilizer.clone();
+        core::run_threaded(move || done(stabilizer.refit_optical_correction()));
+    }
+    fn optical_correction_info(&self) -> QString {
+        QString::from(self.stabilizer.optical_correction_info().to_string())
+    }
+    /// Where the last analysis tracked points in the frame at `timestamp_us` (the file's own time), for the point editor:
+    /// `[x, y, state, track, ...]`, relative to the frame (the stabilized one with `stabilized`), `state` as `PointState`
+    fn optical_tracked_points(&self, timestamp_us: f64, stabilized: bool) -> QString {
+        let flat: Vec<f64> = self.stabilizer.optical_tracked_points(timestamp_us.round() as i64, stabilized).into_iter()
+            .flat_map(|(id, x, y, s)| [x as f64, y as f64, s as u8 as f64, id as f64]).collect();
+        QString::from(serde_json::to_string(&flat).unwrap_or_default())
+    }
+    /// Looks for the tracks with a point within a box (relative to the frame, the stabilized one with `stabilized`) in
+    /// the frame at `timestamp_us` (the file's own time), or within the part of the camera frame the box covers there
+    /// in any frame: off the UI thread, every frame of a long clip takes seconds. Returns which search it is, and
+    /// `optical_tracks_found` brings what it found (a JSON array of their ids), unless another search or
+    /// `cancel_optical_track_search` overtook it
+    fn find_optical_tracks_in_rect(&self, timestamp_us: f64, x0: f64, y0: f64, x1: f64, y1: f64, all_frames: bool, stabilized: bool) -> u32 {
+        let rect = [x0.min(x1) as f32, y0.min(y1) as f32, x0.max(x1) as f32, y0.max(y1) as f32];
+        let search = self.optical_track_search.fetch_add(1, SeqCst).wrapping_add(1);
+        let latest = self.optical_track_search.clone();
+        let found = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, (search, ids): (u32, Vec<u32>)| {
+            this.optical_tracks_found(search, QString::from(serde_json::to_string(&ids).unwrap_or_default()));
+        });
+        let stabilizer = self.stabilizer.clone();
+        core::run_threaded(move || {
+            let overtaken = || latest.load(SeqCst) != search;
+            if let Some(ids) = stabilizer.optical_tracks_in_rect(timestamp_us.round() as i64, rect, all_frames, stabilized, overtaken) {
+                found((search, ids));
+            }
+        });
+        search
+    }
+    fn cancel_optical_track_search(&self) {
+        self.optical_track_search.fetch_add(1, SeqCst);
+    }
+    /// Where the tracks `ids` (a JSON array) are in the frames up to `reach` away from the one at `timestamp_us`:
+    /// `{ "id": [frames from that one, x, y, ...] }`, relative to the frame (the stabilized one with `stabilized`)
+    fn optical_track_paths(&self, ids: String, timestamp_us: f64, reach: usize, stabilized: bool) -> QString {
+        let ids: std::collections::HashSet<u32> = serde_json::from_str(&ids).unwrap_or_default();
+        let paths: serde_json::Map<String, serde_json::Value> = self.stabilizer.optical_track_paths(&ids, timestamp_us.round() as i64, reach, stabilized).into_iter()
+            .map(|(id, path)| (id.to_string(), path.into_iter().flat_map(|(f, x, y)| [f as f64, x as f64, y as f64]).collect::<Vec<f64>>().into()))
+            .collect();
+        QString::from(serde_json::Value::Object(paths).to_string())
+    }
+    /// Takes the tracks `ids` (a JSON array) out of what the analysis measured, or puts them back (`remove` false).
+    /// Returns the ones that weren't already, a JSON array: what an undo changes back
+    fn remove_optical_tracks(&mut self, ids: String, remove: bool) -> QString {
+        let ids: Vec<u32> = serde_json::from_str(&ids).unwrap_or_default();
+        let changed = self.stabilizer.remove_optical_tracks(&ids, remove);
+        self.optical_tracks_edited(!changed.is_empty());
+        QString::from(serde_json::to_string(&changed).unwrap_or_default())
+    }
+    fn restore_optical_tracks(&mut self) {
+        let changed = self.stabilizer.restore_optical_tracks();
+        self.optical_tracks_edited(changed);
+    }
+    /// The points show the change right away; the correction follows once the analysis is measured again without the
+    /// tracks taken out, off the UI thread. A change while that runs overtakes it, and measures again itself
+    fn optical_tracks_edited(&mut self, changed: bool) {
+        if !changed { return; }
+        self.optical_tracks_changed();
+        self.optical_correction_changed();
+        self.remeasure_optical_correction();
+    }
+    fn remeasure_optical_correction(&mut self) {
+        self.optical_remeasures += 1;
+        let done = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, result: Result<bool, String>| {
+            this.optical_remeasures = this.optical_remeasures.saturating_sub(1);
+            match result {
+                Ok(true) => {
+                    this.stabilizer.invalidate_zooming();
+                    this.request_recompute();
+                    this.chart_data_changed();
+                },
+                Ok(false) => { },
+                Err(e) => this.error(QString::from("An error occurred: %1"), QString::from(e), QString::default()),
+            }
+            this.optical_tracks_changed();
+            this.optical_correction_changed();
+        });
+        let stabilizer = self.stabilizer.clone();
+        core::run_threaded(move || done(stabilizer.remeasure_optical_correction()));
+    }
     wrap_simple_method!(set_device, v: i32);
 
     // ---------- External audio ----------
@@ -2435,11 +2721,7 @@ impl Controller {
     fn mesh_at_frame(&self, frame: usize) -> QVariantList {
         let gyro = self.stabilizer.gyro.read();
         let file_metadata = gyro.file_metadata.read();
-        if let Some(mc) = file_metadata.mesh_correction.get(frame) {
-            QVariantList::from_iter(mc.1.iter())
-        } else {
-            QVariantList::default()
-        }
+        QVariantList::from_iter(file_metadata.mesh_correction.kernel_buffer(frame).iter())
     }
     fn get_turn_speed(&self, timestamp_ms: f64) -> f64 {
         let params = self.stabilizer.params.read();
@@ -2524,6 +2806,25 @@ impl Controller {
                     }
                 }
             }
+        });
+    }
+
+    fn check_server_message(&self) {
+        let show = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, json: String| {
+            this.server_message(QString::from(json))
+        });
+        core::run_threaded(move || {
+            let url = format!("https://api.gyroflow.xyz/message?version={}&os={}", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
+            let Ok(Ok(body)) = ureq::get(url).call().map(|x| x.into_body().read_to_string()) else { return; };
+            let Ok(mut msg) = serde_json::from_str::<serde_json::Value>(&body) else { return; };
+            if msg.get("type").and_then(|x| x.as_str()).is_none() { return; }
+
+            // QML can't fetch https itself, so download the image here and only show the message once it's ready
+            if let Some(image_url) = msg.get("image").and_then(|x| x.as_str()) {
+                let Some(data_url) = util::download_as_data_url(image_url) else { return; };
+                msg["image"] = data_url.into();
+            }
+            show(msg.to_string());
         });
     }
 
@@ -2668,18 +2969,18 @@ impl Controller {
                                         cal.feed_frame(timestamp_us, frame, (width, height), org_size, stride, pt_scale, pixels, cancel_flag2.clone(), total, processed.clone(), progress.clone());
                                     },
                                     Err(e) => {
-                                        err2(("An error occured: %1".to_string(), e.to_string()))
+                                        err2(("An error occurred: %1".to_string(), e.to_string()))
                                     }
                                 }
                             }
                             Ok(())
                         });
                         if let Err(e) = proc.start_decoder_only(ranges, cancel_flag.clone()) {
-                            err(("An error occured: %1".to_string(), e.to_string()));
+                            err(("An error occurred: %1".to_string(), e.to_string()));
                         }
                     }
                     Err(error) => {
-                        err(("An error occured: %1".to_string(), error.to_string()));
+                        err(("An error occurred: %1".to_string(), error.to_string()));
                     }
                 }
                 // Don't lock the UI trying to draw chessboards while we calibrate
@@ -2692,7 +2993,7 @@ impl Controller {
                 let mut lock = cal.write();
                 let cal = lock.as_mut().unwrap();
                 if let Err(e) = cal.calibrate(is_forced) {
-                    err(("An error occured: %1".to_string(), format!("{:?}", e)));
+                    err(("An error occurred: %1".to_string(), format!("{:?}", e)));
                 } else {
                     if cal.rms < 100.0 {
                         stab.lens.write().set_from_calibrator(cal);
@@ -2808,10 +3109,10 @@ impl Controller {
                         }
                         true
                     }
-                    Err(e) => { self.error(QString::from("An error occured: %1"), QString::from(format!("{:?}", e)), QString::default()); false }
+                    Err(e) => { self.error(QString::from("An error occurred: %1"), QString::from(format!("{:?}", e)), QString::default()); false }
                 }
             },
-            Err(e) => { self.error(QString::from("An error occured: %1"), QString::from(format!("{:?}", e)), QString::default()); false }
+            Err(e) => { self.error(QString::from("An error occurred: %1"), QString::from(format!("{:?}", e)), QString::default()); false }
         }
     }
 
@@ -2967,7 +3268,7 @@ impl Controller {
         }
         let contents = content.to_json_pretty();
         if let Err(e) = filesystem::write(&url, contents.to_slice()) {
-            self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+            self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
         }
         QString::from(filesystem::display_url(&url))
     }
@@ -2978,13 +3279,13 @@ impl Controller {
             Ok(filesystem::write(&util::qurl_to_encoded(url), contents.as_bytes())?)
         };
         if let Err(e) = result() {
-            self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+            self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
         }
     }
     fn export_parsed_metadata(&self, url: QUrl) {
         if let Ok(contents) = serde_json::to_string_pretty(&self.stabilizer.gyro.read().file_metadata) {
             if let Err(e) = filesystem::write(&util::qurl_to_encoded(url), contents.as_bytes()) {
-                self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+                self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
             }
         }
     }
@@ -2994,7 +3295,7 @@ impl Controller {
 
         let contents = fpvflow_core::gyro_export::export_gyro_data(&filename, fields.to_json().to_str().unwrap(), &self.stabilizer);
         if let Err(e) = filesystem::write(&url, contents.as_bytes()) {
-            self.error(QString::from("An error occured: %1"), QString::from(e.to_string()), QString::default());
+            self.error(QString::from("An error occurred: %1"), QString::from(e.to_string()), QString::default());
         }
     }
 
@@ -3087,6 +3388,16 @@ impl Controller {
     fn has_per_frame_focal_length(&self) -> bool {
         self.stabilizer.gyro.read().file_metadata.read().has_per_frame_focal_length()
     }
+    fn has_lens_breathing(&self) -> bool {
+        !self.stabilizer.gyro.read().file_metadata.read().lens_breathing.is_empty()
+    }
+    fn get_lens_breathing_enabled(&self) -> bool {
+        self.stabilizer.params.read().lens_breathing_enabled
+    }
+    fn set_lens_breathing_enabled(&mut self, v: bool) {
+        self.stabilizer.params.write().lens_breathing_enabled = v;
+        self.request_recompute();
+    }
 
     fn get_focal_length_smoothing_enabled(&self) -> bool {
         self.stabilizer.params.read().focal_length_smoothing_enabled
@@ -3096,11 +3407,22 @@ impl Controller {
         self.request_recompute();
     }
 
-    fn get_focal_length_smoothing_strength(&self) -> f64 {
-        self.stabilizer.params.read().focal_length_smoothing_strength
+    fn get_focal_length_max_zoom_rate(&self) -> f64 {
+        self.stabilizer.params.read().focal_length_max_zoom_rate
     }
-    fn set_focal_length_smoothing_strength(&mut self, v: f64) {
-        self.stabilizer.params.write().focal_length_smoothing_strength = v.clamp(0.0, 1.0);
+    fn set_focal_length_max_zoom_rate(&mut self, v: f64) {
+        self.stabilizer.params.write().focal_length_max_zoom_rate = v.clamp(0.01, 10.0);
+        self.request_recompute();
+    }
+
+    fn get_lens_metadata_delay_frames(&self) -> i32 {
+        self.stabilizer.params.read().lens_metadata_delay_frames
+    }
+    fn set_lens_metadata_delay_frames(&mut self, v: i32) {
+        let v = v.clamp(-30, 30);
+        if self.stabilizer.params.read().lens_metadata_delay_frames == v { return; }
+        self.stabilizer.params.write().lens_metadata_delay_frames = v;
+        self.lens_metadata_delay_changed();
         self.request_recompute();
     }
 
@@ -3362,7 +3684,7 @@ impl Controller {
     fn has_per_frame_lens_data(&self) -> bool {
         let gyro = self.stabilizer.gyro.read();
         let md = gyro.file_metadata.read();
-        md.camera_stab_data.len() > 1 || md.lens_geometry_count() > 1 || md.lens_positions.len() > 1 || md.mesh_correction.len() > 1
+        md.camera_stab_data.len() > 1 || md.lens_geometry_count() > 1 || md.lens_positions.len() > 1 || md.has_mesh_correction()
     }
     fn export_stmap(&self, folder_url: QUrl, per_frame: bool) {
         let folder_url = util::qurl_to_encoded(folder_url);
@@ -3372,7 +3694,7 @@ impl Controller {
             this.stmap_progress(ready as f64 / total as f64, ready, total);
         });
         let err = util::qt_queued_callback_mut(QPointer::from(self as &Self), |this, msg: String| {
-            this.error(QString::from("An error occured: %1"), QString::from(msg), QString::default());
+            this.error(QString::from("An error occurred: %1"), QString::from(msg), QString::default());
         });
 
         self.cancel_flag.store(false, SeqCst);
@@ -3385,7 +3707,7 @@ impl Controller {
         {
             let params = stab.params.read();
             if params.size.0 <= 0 || params.size.1 <= 0 {
-                self.error(QString::from("An error occured: %1"), QString::from("Video is not loaded"), QString::default());
+                self.error(QString::from("An error occurred: %1"), QString::from("Video is not loaded"), QString::default());
                 return;
             }
         }
@@ -3434,7 +3756,7 @@ impl Controller {
                         };
                         match result {
                             Ok(r) => signal(r),
-                            Err(e) => signal(format!("An error occured: {e:?}"))
+                            Err(e) => signal(format!("An error occurred: {e:?}"))
                         }
                     });
                     Ok(String::new())
@@ -3445,7 +3767,7 @@ impl Controller {
             };
             match result {
                 Ok(r) => QString::from(r),
-                Err(e) => QString::from(format!("An error occured: {e:?}"))
+                Err(e) => QString::from(format!("An error occurred: {e:?}"))
             }
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos")))] { QString::default() }

@@ -3,10 +3,15 @@
 
 use crate::gpu::{ Buffers, BufferSource };
 
-use super::{ PixelType, Stabilization, ComputeParams, FrameTransform, KernelParams, distortion_models::DistortionModel };
+use super::{ PixelType, Stabilization, ComputeParams, FrameTransform, KernelParams, distortion_models::DistortionModel, projection };
 use nalgebra::{ Vector2, Vector3, Vector4, Matrix3 };
 use rayon::{ prelude::ParallelSliceMut, iter::{ ParallelIterator, IndexedParallelIterator } };
 use crate::util::map_coord;
+
+fn rotate_point(pos: (f32, f32), angle: f32, origin: (f32, f32), origin2: (f32, f32)) -> (f32, f32) {
+    (angle.cos() * (pos.0 - origin.0) - angle.sin() * (pos.1 - origin.1) + origin2.0,
+     angle.sin() * (pos.0 - origin.0) + angle.cos() * (pos.1 - origin.1) + origin2.1)
+}
 
 pub const INVALID_POINT: (f32, f32) = (-1_000_000.0, -1_000_000.0);
 
@@ -93,8 +98,75 @@ pub const COEFFS: [f32; 64+128+256 + 9*4 + 4] = [
 // ];
 // const ALPHAS: [f32; 4] = [ 1.0, 0.75, 0.50, 0.25 ];
 
+/// The kernel parameters as the SPIR-V kernel's struct, field by field. The two are separate definitions of one layout
+/// (packed arrays here, glam vectors there), so a transmute between them fails, or silently misreads, whenever they
+/// drift apart or the build picks up another revision of `stabilize_spirv` (it's built as a dylib, which cargo doesn't
+/// give a hashed file name, so builds of different revisions in one target dir replace each other's)
+fn spirv_kernel_params(params: &KernelParams) -> stabilize_spirv::KernelParams {
+    use stabilize_spirv::glam::{ Vec2, Vec4, IVec4 };
+    let p = *params; // packed, the fields are read by value
+    let (k, digital_lens_params) = (p.k, p.digital_lens_params);
+    let vec4 = |a: &[f32]| Vec4::new(a[0], a[1], a[2], a[3]);
+    stabilize_spirv::KernelParams {
+        width:                     p.width,
+        height:                    p.height,
+        stride:                    p.stride,
+        output_width:              p.output_width,
+        output_height:             p.output_height,
+        output_stride:             p.output_stride,
+        matrix_count:              p.matrix_count,
+        interpolation:             p.interpolation,
+        background_mode:           p.background_mode,
+        flags:                     p.flags,
+        bytes_per_pixel:           p.bytes_per_pixel,
+        pix_element_count:         p.pix_element_count,
+        background:                Vec4::from_array(p.background),
+        f:                         Vec2::from_array(p.f),
+        c:                         Vec2::from_array(p.c),
+        k1:                        vec4(&k[0..4]),
+        k2:                        vec4(&k[4..8]),
+        k3:                        vec4(&k[8..12]),
+        k4:                        vec4(&k[12..16]),
+        k5:                        vec4(&k[16..20]),
+        k6:                        vec4(&k[20..24]),
+        fov:                       p.fov,
+        field_limit:               p.field_limit,
+        lens_correction_amount:    p.lens_correction_amount,
+        input_vertical_stretch:    p.input_vertical_stretch,
+        input_horizontal_stretch:  p.input_horizontal_stretch,
+        background_margin:         p.background_margin,
+        background_margin_feather: p.background_margin_feather,
+        canvas_scale:              p.canvas_scale,
+        input_rotation:            p.input_rotation,
+        output_rotation:           p.output_rotation,
+        translation2d:             Vec2::from_array(p.translation2d),
+        translation3d:             Vec4::from_array(p.translation3d),
+        source_rect:               IVec4::from_array(p.source_rect),
+        output_rect:               IVec4::from_array(p.output_rect),
+        digital_lens_params:       vec4(&digital_lens_params[0..4]),
+        digital_lens_params2:      vec4(&digital_lens_params[4..8]),
+        digital_lens_params3:      vec4(&digital_lens_params[8..12]),
+        digital_lens_params4:      vec4(&digital_lens_params[12..16]),
+        safe_area_rect:            Vec4::from_array(p.safe_area_rect),
+        max_pixel_value:           p.max_pixel_value,
+        distortion_model:          p.distortion_model as u32,
+        digital_lens:              p.digital_lens as u32,
+        pixel_value_limit:         p.pixel_value_limit,
+        light_refraction_coefficient: p.light_refraction_coefficient,
+        plane_index:               p.plane_index,
+        output_projection:         p.output_projection,
+        lut_amount:                p.lut_amount,
+        ewa_coeffs_p:              Vec4::from_array(p.ewa_coeffs_p),
+        ewa_coeffs_q:              Vec4::from_array(p.ewa_coeffs_q),
+        color_adjust1:             Vec4::from_array(p.color_adjust1),
+        color_adjust2:             Vec4::from_array(p.color_adjust2),
+        color_adjust3:             Vec4::from_array(p.color_adjust3),
+        color_adjust4:             Vec4::from_array(p.color_adjust4),
+    }
+}
+
 impl Stabilization {
-    pub fn undistort_image_cpu_spirv<T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8]) -> bool {
+    pub fn undistort_image_cpu_spirv<T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 16]], drawing: &[u8]) -> bool {
         if let BufferSource::Cpu { buffer: input } = &mut buffers.input.data {
             if let BufferSource::Cpu { buffer: output } = &mut buffers.output.data {
                 if buffers.output.size.2 <= 0 {
@@ -102,10 +174,10 @@ impl Stabilization {
                     return false;
                 }
 
+                let params2 = spirv_kernel_params(params);
                 output.par_chunks_mut(buffers.output.size.2).enumerate().for_each(|(y, row_bytes)| { // Parallel iterator over buffer rows
                     row_bytes.chunks_mut(params.bytes_per_pixel as usize).enumerate().for_each(|(x, pix_chunk)| { // iterator over row pixels
-                        let matrices2: &[f32] = unsafe { std::slice::from_raw_parts(matrices.as_ptr() as *const f32, matrices.len() * 14 ) };
-                        let params2: stabilize_spirv::KernelParams  = unsafe { std::mem::transmute(*params) };
+                        let matrices2: &[f32] = unsafe { std::slice::from_raw_parts(matrices.as_ptr() as *const f32, matrices.len() * 16 ) };
                         let drawing2: &[u32]  = unsafe { std::slice::from_raw_parts(drawing.as_ptr() as *const u32, drawing.len() / 4 ) };
 
                         let color = stabilize_spirv::undistort(
@@ -136,37 +208,237 @@ impl Stabilization {
         }
     }
 
-    pub fn rotate_and_distort(pos: (f32, f32), idx: usize, params: &KernelParams, matrices: &[[f32; 14]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64]) -> Option<(f32, f32)> {
-        let matrices = matrices[idx];
-        let _x = (pos.0 * matrices[0]) + (pos.1 * matrices[1]) + matrices[2] + params.translation3d[0];
-        let _y = (pos.0 * matrices[3]) + (pos.1 * matrices[4]) + matrices[5] + params.translation3d[1];
-        let mut _w = (pos.0 * matrices[6]) + (pos.1 * matrices[7]) + matrices[8] + params.translation3d[2];
-        if _w > 0.0 {
-            if params.r_limit > 0.0 && (_x.powi(2) + _y.powi(2)) > r_limit_sq * (_w * _w) {
-                return None;
-            }
+    /// One output pixel -> the source pixel it samples: the render itself, so anything that needs to know
+    /// what the picture does (the STMap export, the tests) can ask the same code the frame is drawn with
+    /// rather than a copy of it that drifts. `out_c`/`out_f` are the output plane the projection reads,
+    /// `(pixel - out_c) / out_f`, built by the caller because they are the same for every pixel
+    pub fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 16]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, mesh_data: &[f64], out_c: &Vector2<f32>, out_f: &Vector2<f32>) -> Option<Vector2<f32>> {
+        out_pos.x = map_coord(out_pos.x, params.output_rect[0] as f32, (params.output_rect[0] + params.output_rect[2]) as f32, 0.0, params.output_width  as f32);
+        out_pos.y = map_coord(out_pos.y, params.output_rect[1] as f32, (params.output_rect[1] + params.output_rect[3]) as f32, 0.0, params.output_height as f32);
+        out_pos.x += params.translation2d[0];
+        out_pos.y += params.translation2d[1];
 
-            if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
-                if _w != 0.0 {
-                    let r = (_x.powi(2) + _y.powi(2)).sqrt() / _w;
-                    let sin_theta_d = (r / (1.0 + r * r).sqrt()) * params.light_refraction_coefficient;
-                    let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                    if r_d != 0.0 {
-                        _w *= r / r_d;
-                    }
+        ///////////////////////////////////////////////////////////////////
+        // Output pixel -> ray. A ray of angle θ lands at `(1-a)·R(θ) + a·P(θ)` of the output plane -
+        // where the source lens images it, mixed with where the output projection wants it (see
+        // `super::projection`). This is that inverted: both maps rise with θ, so the mix does too, and
+        // the root is bracketed by the angles the two projections would each have given on their own.
+        let a = params.lens_correction_amount;
+        let n_raw = (out_pos - out_c).component_div(out_f);
+        let mut n = n_raw;
+        if (params.flags & 2) == 2 && a < 1.0 { // Has digial lens
+            if let Some(digital) = digital_lens {
+                // Apply the digital warp in the UN-zoomed (fov=1) frame so it's FOV-independent,
+                let uz = ((out_pos.x - out_c.x) * params.fov + out_c.x, (out_pos.y - out_c.y) * params.fov + out_c.y);
+                if let Some(pt) = digital.undistort_point(uz, params) {
+                    n = Vector2::new((pt.0 - out_c.x) / params.fov, (pt.1 - out_c.y) / params.fov).component_div(out_f);
                 }
+            }
+        }
+        let proj_ray = projection::unproject((n_raw.x, n_raw.y), params.output_projection);
+        let mut ray = proj_ray;
+        if a < 1.0 {
+            // With a digital warp the two legs read different planes - the source lens sees the frame the
+            // warp came from - so the target the blend has to reach is mixed the same way as the legs are,
+            // which leaves both ends exact and costs nothing when there is no warp (`n` is then `n_raw`)
+            let nb = n * (1.0 - a) + n_raw * a;
+            let t = (nb.x * nb.x + nb.y * nb.y).sqrt();
+            if t > 1e-9 {
+                let u = (nb.x / t, nb.y / t);
+                // The two ends of the bracket: what the output projection alone says (the blend is at or
+                // below `t` there) and what the source lens alone says (at or above)
+                let lo0 = (proj_ray.0 * proj_ray.0 + proj_ray.1 * proj_ray.1).sqrt();
+                let src = distortion_model.undistort_point((n.x, n.y), params);
+                // Under water the lens's angles are the housing's; the bracket is in the water's, the inverse of
+                // Snell's law away - and no ray past the flat port's 90° ever enters the housing
+                let refr = params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0;
+                let water = |th: f32| -> f32 {
+                    if refr { (th.min(std::f32::consts::FRAC_PI_2).sin() / params.light_refraction_coefficient).clamp(-1.0, 1.0).asin() } else { th }
+                };
+                let (mut hi0, mut edge) = match src {
+                    Some(s) => (water((s.0 * s.0 + s.1 * s.1).sqrt()), false),
+                    // Past the edge of its own image the model has no inverse, but the lens still reaches
+                    // to its field limit and the blend may well land inside `t` before then
+                    None if params.field_limit > 0.0 => (water(params.field_limit), true),
+                    None => return None
+                };
+                // ... and the root cannot be past the angle at which the output projection alone would already have
+                // used up `t` (`a·P(θ) <= t` at the root), and pinning the bracket there keeps both residuals
+                // of the order of `t`. Without it a lens that sees past 90° hands `P`'s "no image" sentinel to
+                // the solve, and a secant cannot move against 1e9: the blend then silently stalled at the
+                // fully corrected angle outside a circle at `R(90°)`
+                if a > 0.0 { hi0 = hi0.min(projection::theta_of_radius(t / a, params.output_projection)); }
+                if a <= 0.0 {
+                    // Exactly the source lens's own ray, tangential terms and all - with the refraction
+                    // `rotate_and_distort` applies on the way out undone here, or the round trip isn't one
+                    let mut s = src?;
+                    if refr {
+                        let th = (s.0 * s.0 + s.1 * s.1).sqrt();
+                        if th > 1e-12 { let k = water(th) / th; s = (s.0 * k, s.1 * k); }
+                    }
+                    ray = s;
+                } else {
+                    // `(1-a)·R(θ) + a·P(θ) - t`, with the refraction the render applies on the way out
+                    let g = |theta: f32| -> f32 {
+                        let mut th = theta;
+                        if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
+                            th = (th.sin() * params.light_refraction_coefficient).clamp(-1.0, 1.0).asin();
+                        }
+                        let (s, c) = (th.sin(), th.cos());
+                        let p = distortion_model.distort_point(u.0 * s, u.1 * s, c, params);
+                        let r = (p.0 * p.0 + p.1 * p.1).sqrt();
+                        (1.0 - a) * r + a * projection::radius_of_theta(theta, params.output_projection) - t
+                    };
+                    let (mut lo, mut hi) = (lo0.min(hi0), lo0.max(hi0));
+                    // The lens ends at its field limit - under water, at Snell's window - and the projection's own
+                    // angle may well lie past it; the bracket ends there too, and past it is background
+                    let cap = water(if params.field_limit > 0.0 { params.field_limit } else { std::f32::consts::PI });
+                    if hi > cap { hi = cap; lo = lo.min(cap); edge = true; }
+                    let (mut glo, mut ghi) = (g(lo), g(hi));
+                    let mut theta = hi;
+                    // Near the axis every projection agrees, so both ends of the bracket are a difference
+                    // of near-equal numbers and the sign of `g` there is float noise - GPU transcendentals
+                    // make that band tens of pixels wide. An end of the bracket that IS the source lens's
+                    // own answer always has a root beside it, so the end itself is the answer; only when the
+                    // end is the field limit - or Snell's window - has the lens really run out, and the pixel is background
+                    if ghi < 0.0 {
+                        if edge { return None; }
+                    } else {
+                        // The projection's own angle overshoots - refraction magnifies the source leg - so bracket from the axis, where the residual is -t
+                        if glo >= 0.0 { lo = 0.0; glo = -t; }
+                        // Regula falsi, Illinois variant: the bracket is tight (the two projections'
+                        // own answers), and halving the stale end keeps it from crawling in from one side
+                        let mut side = 0i32;
+                        for _ in 0..6 {
+                            let d = ghi - glo;
+                            theta = if d.abs() > 1e-12 { (lo - glo * (hi - lo) / d).clamp(lo, hi) } else { 0.5 * (lo + hi) };
+                            let gt = g(theta);
+                            if gt < 0.0 {
+                                lo = theta; glo = gt;
+                                if side == -1 { ghi *= 0.5; }
+                                side = -1;
+                            } else {
+                                hi = theta; ghi = gt;
+                                if side == 1 { glo *= 0.5; }
+                                side = 1;
+                            }
+                        }
+                    }
+                    // The source lens's own ray is off its radius by the tangential terms; that offset belongs to the
+                    // source leg, so it fades out with it. It is measured against `n`, the point that leg reads: a
+                    // digital warp moves `n` off `u`, and that is no offset of the lens's
+                    let dir = match src {
+                        Some(s) => {
+                            let sl = (s.0 * s.0 + s.1 * s.1).sqrt();
+                            let nl = (n.x * n.x + n.y * n.y).sqrt();
+                            if sl > 1e-12 && nl > 1e-12 {
+                                let d = (u.0 + (1.0 - a) * (s.0 / sl - n.x / nl), u.1 + (1.0 - a) * (s.1 / sl - n.y / nl));
+                                let dl = (d.0 * d.0 + d.1 * d.1).sqrt();
+                                if dl > 1e-12 { (d.0 / dl, d.1 / dl) } else { u }
+                            } else { u }
+                        },
+                        None => u
+                    };
+                    ray = (dir.0 * theta, dir.1 * theta);
+                }
+            }
+        }
+        ///////////////////////////////////////////////////////////////////
+
+        ///////////////////////////////////////////////////////////////////
+        // Calculate source `y` for rolling shutter
+        let mut sy = if (params.flags & 16) == 16 { // Horizontal RS
+            (out_pos.x.round() as i32).min(params.width).max(0) as usize
+        } else {
+            (out_pos.y.round() as i32).min(params.height).max(0) as usize
+        };
+        if params.matrix_count > 1 {
+            let idx = params.matrix_count as usize / 2;
+            if let Some(pt) = Stabilization::rotate_and_distort(ray, idx, params, matrices, distortion_model, digital_lens, mesh_data) {
+                if (params.flags & 16) == 16 { // Horizontal RS
+                    sy = (pt.0.round() as i32).min(params.width).max(0) as usize;
+                } else {
+                    sy = (pt.1.round() as i32).min(params.height).max(0) as usize;
+                }
+            }
+        }
+        ///////////////////////////////////////////////////////////////////
+
+        let idx = sy.min(params.matrix_count as usize - 1);
+        let mut uv = Stabilization::rotate_and_distort(ray, idx, params, matrices, distortion_model, digital_lens, mesh_data)?;
+        let mut frame_size = (params.width as f32, params.height as f32);
+        if params.input_rotation != 0.0 {
+            let rotation = params.input_rotation * (std::f32::consts::PI / 180.0);
+            let size = frame_size;
+            frame_size = rotate_point(size, rotation, (0.0, 0.0), (0.0, 0.0));
+            frame_size = (frame_size.0.abs().round(), frame_size.1.abs().round());
+            uv = rotate_point(uv, rotation, (size.0 / 2.0, size.1 / 2.0), (frame_size.0 / 2.0, frame_size.1 / 2.0));
+        }
+
+        // `uv` is in the input frame now, turned by the input rotation, so its edges are those of `frame_size`
+        let (width_f, height_f) = frame_size;
+        if params.background_mode == 1 { // Edge repeat
+            uv = (
+                uv.0.max(3.0).min(width_f  - 3.0),
+                uv.1.max(3.0).min(height_f - 3.0),
+            );
+        } else if params.background_mode == 2 { // Edge mirror
+            let rx = uv.0.round();
+            let ry = uv.1.round();
+            let width3 = width_f - 3.0;
+            let height3 = height_f - 3.0;
+            if rx > width3  { uv.0 = width3  - (rx - width3); }
+            if rx < 3.0     { uv.0 = 3.0 + width_f - (width3  + rx); }
+            if ry > height3 { uv.1 = height3 - (ry - height3); }
+            if ry < 3.0     { uv.1 = 3.0 + height_f - (height3 + ry); }
+        }
+        if params.background_mode != 3 {
+            uv = (
+                map_coord(uv.0, 0.0, frame_size.0, params.source_rect[0] as f32, (params.source_rect[0] + params.source_rect[2]) as f32),
+                map_coord(uv.1, 0.0, frame_size.1, params.source_rect[1] as f32, (params.source_rect[1] + params.source_rect[3]) as f32)
+            );
+        }
+        Some(Vector2::new(uv.0, uv.1))
+    }
+
+    /// Ray -> source pixel. `ray` is an angle vector (`θ·û`, see [`super::projection`]) in the output
+    /// camera's frame; the matrix row rotates it into the source camera, and the lens images it.
+    pub fn rotate_and_distort(ray: (f32, f32), idx: usize, params: &KernelParams, matrices: &[[f32; 16]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, mesh_data: &[f64]) -> Option<(f32, f32)> {
+        let matrices = matrices[idx];
+        let d = projection::ray_to_dir(ray);
+        let mut _x = (d.0 * matrices[0]) + (d.1 * matrices[1]) + (d.2 * matrices[2]) + params.translation3d[0];
+        let mut _y = (d.0 * matrices[3]) + (d.1 * matrices[4]) + (d.2 * matrices[5]) + params.translation3d[1];
+        let mut _w = (d.0 * matrices[6]) + (d.1 * matrices[7]) + (d.2 * matrices[8]) + params.translation3d[2];
+        {
+            let rxy = (_x * _x + _y * _y).sqrt();
+            // The ray's angle in the source camera. Past the lens's own field, or past a fold of its
+            // calibration, it has no image at all
+            let theta = rxy.atan2(_w);
+            if params.field_limit > 0.0 && theta > params.field_limit { return None; }
+
+            // Refraction (underwater): Snell's law on the angle itself, exact for any field. Past the critical angle - or behind the flat port - no ray enters the housing at all: Snell's window ends there
+            if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 && rxy > 1e-12 {
+                let sin_d = theta.sin() * params.light_refraction_coefficient;
+                if sin_d >= 1.0 || _w <= 0.0 { return None; }
+                let theta_d = sin_d.asin();
+                let (s, c) = (theta_d.sin() / rxy, theta_d.cos());
+                _x *= s; _y *= s; _w = c;
             }
 
             let mut uv = distortion_model.distort_point(_x, _y, _w, &params);
+            // Focus breathing: this row's magnification of the source image (`gyro_source::sony::breathing`)
+            if matrices[14] > 0.0 { uv = (uv.0 * matrices[14], uv.1 * matrices[14]); }
             uv = (uv.0 * params.f[0], uv.1 * params.f[1]);
 
             if matrices[9] != 0.0 || matrices[10] != 0.0 || matrices[11] != 0.0 || matrices[12] != 0.0 || matrices[13] != 0.0 {
+                // The camera applies the sensor roll before the sensor/lens shift, so undo the shift first and then the roll
                 let ang_rad = matrices[11];
                 let cos_a = (-ang_rad).cos();
                 let sin_a = (-ang_rad).sin();
+                let shifted = (uv.0 - matrices[9] + matrices[12], uv.1 - matrices[10] + matrices[13]);
                 uv = (
-                    cos_a * uv.0 - sin_a * uv.1 - matrices[9]  + matrices[12],
-                    sin_a * uv.0 + cos_a * uv.1 - matrices[10] + matrices[13]
+                    cos_a * shifted.0 - sin_a * shifted.1,
+                    sin_a * shifted.0 + cos_a * shifted.1
                 );
             }
 
@@ -182,7 +454,23 @@ impl Stabilization {
                 uv.0 = map_coord(uv.0, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
                 uv.1 = map_coord(uv.1, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
 
-                let new_pos = crate::gyro_source::interpolate_mesh(uv.0 as f64, uv.1 as f64, (mesh_size.0, mesh_size.1), mesh_data);
+                let q = (uv.0 as f64, uv.1 as f64);
+                let mut new_pos = crate::gyro_source::interpolate_mesh(q.0, q.1, (mesh_size.0, mesh_size.1), mesh_data);
+                // The 9x9 inverse mesh is only approximate for large warps, refine against the camera's forward mesh (fwd(p) = q).
+                // The block is only there when the mesh needs it (`sony::MESH_REFINE_THRESHOLD_PX`), and a first correction
+                // that is already tiny leaves nothing for a second one (`sony::MESH_REFINE_SKIP_PX`)
+                let o = mesh_data[0] as usize;
+                let fwd = o + 4 + 2 * (mesh_data[o].max(0.0) as usize);
+                if mesh_data.len() > fwd + 9 && mesh_data[fwd] > 10.0 {
+                    let skip_sq = crate::gyro_source::MESH_REFINE_SKIP_PX * crate::gyro_source::MESH_REFINE_SKIP_PX;
+                    for _ in 0..2 {
+                        let f = crate::gyro_source::interpolate_mesh(new_pos.x, new_pos.y, (mesh_size.0, mesh_size.1), &mesh_data[fwd..]);
+                        let (dx, dy) = (q.0 - f.x, q.1 - f.y);
+                        new_pos.x += dx;
+                        new_pos.y += dy;
+                        if dx * dx + dy * dy < skip_sq { break; }
+                    }
+                }
 
                 uv.0 = map_coord(new_pos.x as f32, origin.0, origin.0 + crop_size.0, 0.0, params.width  as f32);
                 uv.1 = map_coord(new_pos.y as f32, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
@@ -197,7 +485,7 @@ impl Stabilization {
                 let mesh_size = (mesh_data[3], mesh_data[4]);
                 let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
                 let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
-                let stblz_grid = mesh_size.1 / 8.0;
+                let stblz_grid = if mesh_data[o + 2] > 0.0 { mesh_data[o + 2] } else { mesh_size.1 / 8.0 }; // band height comes with the table
 
                 if (params.flags & 128) == 128 { uv.1 = params.height as f32 - uv.1; } // framebuffer inverted
 
@@ -228,15 +516,14 @@ impl Stabilization {
             if params.input_horizontal_stretch > 0.001 { uv.0 /= params.input_horizontal_stretch; }
             if params.input_vertical_stretch   > 0.001 { uv.1 /= params.input_vertical_stretch; }
 
-            return Some(uv);
+            Some(uv)
         }
-        return None;
     }
 
     // Adapted from OpenCV: initUndistortRectifyMap + remap
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/calib3d/src/fisheye.cpp#L465-L567
     // https://github.com/opencv/opencv/blob/2b60166e5c65f1caccac11964ad760d847c536e4/modules/imgproc/src/opencl/remap.cl#L390-L498
-    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 14]], drawing: &[u8], mesh_data: &[f32], color_lut: Option<&crate::color::lut::Lut>) -> bool {
+    pub fn undistort_image_cpu<const I: i32, T: PixelType>(buffers: &mut Buffers, params: &KernelParams, distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, matrices: &[[f32; 16]], drawing: &[u8], mesh_data: &[f32], color_lut: Option<&crate::color::lut::Lut>) -> bool {
         // #[cold]
         // fn draw_pixel(pix: &mut Vector4<f32>, x: i32, y: i32, is_input: bool, width: i32, params: &KernelParams, drawing: &[u8]) {
         //     if drawing.is_empty() || (params.flags & 8) == 0 { return; }
@@ -298,11 +585,6 @@ impl Stabilization {
                 params.max_pixel_value,
                 (params.output_width as f32, params.output_height as f32),
             );
-        }
-
-        fn rotate_point(pos: (f32, f32), angle: f32, origin: (f32, f32), origin2: (f32, f32)) -> (f32, f32) {
-             return (angle.cos() * (pos.0 - origin.0) - angle.sin() * (pos.1 - origin.1) + origin2.0,
-                     angle.sin() * (pos.0 - origin.0) + angle.cos() * (pos.1 - origin.1) + origin2.1);
         }
 
         ////////////////////////////// EWA (Elliptical Weighted Average) CubicBC sampling //////////////////////////////
@@ -460,113 +742,19 @@ impl Stabilization {
             )
         }
 
-        fn undistort_coord(mut out_pos: Vector2<f32>, params: &KernelParams, matrices: &[[f32; 14]], distortion_model: &DistortionModel, digital_lens: Option<&DistortionModel>, r_limit_sq: f32, mesh_data: &[f64], out_c: &Vector2<f32>, out_f: &Vector2<f32>) -> Option<Vector2<f32>> {
-            out_pos.x = map_coord(out_pos.x, params.output_rect[0] as f32, (params.output_rect[0] + params.output_rect[2]) as f32, 0.0, params.output_width  as f32);
-            out_pos.y = map_coord(out_pos.y, params.output_rect[1] as f32, (params.output_rect[1] + params.output_rect[3]) as f32, 0.0, params.output_height as f32);
-            out_pos.x += params.translation2d[0];
-            out_pos.y += params.translation2d[1];
-
-            ///////////////////////////////////////////////////////////////////
-            // Add lens distortion back
-            if params.lens_correction_amount < 1.0 {
-                let mut new_out_pos = out_pos;
-
-                if (params.flags & 2) == 2 { // Has digial lens
-                    if let Some(digital) = digital_lens {
-                        // Apply the digital warp in the UN-zoomed (fov=1) frame so it's FOV-independent,
-                        let uz = ((new_out_pos.x - out_c.x) * params.fov + out_c.x, (new_out_pos.y - out_c.y) * params.fov + out_c.y);
-                        if let Some(pt) = digital.undistort_point(uz, params) {
-                            new_out_pos.x = (pt.0 - out_c.x) / params.fov + out_c.x;
-                            new_out_pos.y = (pt.1 - out_c.y) / params.fov + out_c.y;
-                        }
-                    }
-                }
-
-                new_out_pos = (new_out_pos - out_c).component_div(out_f);
-                let pt = distortion_model.undistort_point((new_out_pos.x, new_out_pos.y), params)?;
-                new_out_pos.x = pt.0;
-                new_out_pos.y = pt.1;
-                if params.light_refraction_coefficient != 1.0 && params.light_refraction_coefficient > 0.0 {
-                    let r = new_out_pos.norm();
-                    if r != 0.0 {
-                        let sin_theta_d = (r / (1.0 + r * r).sqrt()) / params.light_refraction_coefficient;
-                        let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                        let factor = r_d / r;
-                        new_out_pos *= factor;
-                    }
-                }
-                new_out_pos = (new_out_pos.component_mul(out_f)) + out_c;
-
-                out_pos = new_out_pos * (1.0 - params.lens_correction_amount) + (out_pos * params.lens_correction_amount);
-            }
-            ///////////////////////////////////////////////////////////////////
-
-            ///////////////////////////////////////////////////////////////////
-            // Calculate source `y` for rolling shutter
-            let mut sy = if (params.flags & 16) == 16 { // Horizontal RS
-                (out_pos.x.round() as i32).min(params.width).max(0) as usize
-            } else {
-                (out_pos.y.round() as i32).min(params.height).max(0) as usize
-            };
-            if params.matrix_count > 1 {
-                let idx = params.matrix_count as usize / 2;
-                if let Some(pt) = Stabilization::rotate_and_distort((out_pos.x, out_pos.y), idx, params, matrices, distortion_model, digital_lens, r_limit_sq, mesh_data) {
-                    if (params.flags & 16) == 16 { // Horizontal RS
-                        sy = (pt.0.round() as i32).min(params.width).max(0) as usize;
-                    } else {
-                        sy = (pt.1.round() as i32).min(params.height).max(0) as usize;
-                    }
-                }
-            }
-            ///////////////////////////////////////////////////////////////////
-
-            let idx = sy.min(params.matrix_count as usize - 1);
-            let mut uv = Stabilization::rotate_and_distort((out_pos.x, out_pos.y), idx, params, matrices, distortion_model, digital_lens, r_limit_sq, mesh_data)?;
-            let mut frame_size = (params.width as f32, params.height as f32);
-            if params.input_rotation != 0.0 {
-                let rotation = params.input_rotation * (std::f32::consts::PI / 180.0);
-                let size = frame_size;
-                frame_size = rotate_point(size, rotation, (0.0, 0.0), (0.0, 0.0));
-                frame_size = (frame_size.0.abs().round(), frame_size.1.abs().round());
-                uv = rotate_point(uv, rotation, (size.0 / 2.0, size.1 / 2.0), (frame_size.0 / 2.0, frame_size.1 / 2.0));
-            }
-
-            let width_f = params.width as f32;
-            let height_f = params.height as f32;
-            if params.background_mode == 1 { // Edge repeat
-                uv = (
-                    uv.0.max(3.0).min(width_f  - 3.0),
-                    uv.1.max(3.0).min(height_f - 3.0),
-                );
-            } else if params.background_mode == 2 { // Edge mirror
-                let rx = uv.0.round();
-                let ry = uv.1.round();
-                let width3 = width_f - 3.0;
-                let height3 = height_f - 3.0;
-                if rx > width3  { uv.0 = width3  - (rx - width3); }
-                if rx < 3.0     { uv.0 = 3.0 + width_f - (width3  + rx); }
-                if ry > height3 { uv.1 = height3 - (ry - height3); }
-                if ry < 3.0     { uv.1 = 3.0 + height_f - (height3 + ry); }
-            }
-            if params.background_mode != 3 {
-                uv = (
-                    map_coord(uv.0, 0.0, frame_size.0, params.source_rect[0] as f32, (params.source_rect[0] + params.source_rect[2]) as f32),
-                    map_coord(uv.1, 0.0, frame_size.1, params.source_rect[1] as f32, (params.source_rect[1] + params.source_rect[3]) as f32)
-                );
-            }
-            Some(Vector2::new(uv.0, uv.1))
-        }
 
         if let BufferSource::Cpu { buffer: input } = &mut buffers.input.data {
             if let BufferSource::Cpu { buffer: output } = &mut buffers.output.data {
-                let r_limit_sq = params.r_limit * params.r_limit; // Square it so we don't have to do sqrt on the point length
-
                 let bg = Vector4::<f32>::new(params.background[0], params.background[1], params.background[2], params.background[3]) * params.max_pixel_value;
                 let bg_t: T = PixelType::from_float(bg);
 
-                let factor = (1.0 - params.lens_correction_amount).max(0.001); // FIXME: this is close but wrong
+                // The output plane: `(pixel - out_c) / out_f` is the normalized coordinate the output
+                // projection reads. It no longer depends on the lens correction amount - the blend happens
+                // in ray space - so the `1/(1-amount)` focal fudge that used to sit here is gone, and this
+                // is now exactly the camera matrix `FrameTransform::get_new_k` builds for the point path
+                let stretch = if params.input_horizontal_stretch > 0.01 { 1.0 / params.input_horizontal_stretch } else { 1.0 };
                 let out_c = Vector2::new(params.output_width as f32 / 2.0, params.output_height as f32 / 2.0);
-                let out_f = Vector2::new(params.f[0] / params.fov / factor, params.f[1] / params.fov / factor);
+                let out_f = Vector2::new(params.f[0] * stretch / params.fov, params.f[1] * stretch / params.fov);
 
                 // let drawing_enabled = !drawing.is_empty() && (params.flags & 8) == 8;
                 let fill_bg = (params.flags & 4) == 4;
@@ -603,12 +791,12 @@ impl Stabilization {
 
                             let position = Vector2::new(x as f32, y as f32);
 
-                            if let Some(mut uv) = undistort_coord(position, params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f) {
+                            if let Some(mut uv) = Self::undistort_coord(position, params, matrices, distortion_model, digital_lens, &mesh_data, &out_c, &out_f) {
                                 let mut jac = Vector4::new(1.0, 0.0, 0.0, 1.0);
                                 if I > 8 {
                                     let eps = 0.01;
-                                    let nx = undistort_coord(position + Vector2::new(eps, 0.0), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f);
-                                    let ny = undistort_coord(position + Vector2::new(0.0, eps), params, matrices, distortion_model, digital_lens, r_limit_sq, &mesh_data, &out_c, &out_f);
+                                    let nx = Self::undistort_coord(position + Vector2::new(eps, 0.0), params, matrices, distortion_model, digital_lens, &mesh_data, &out_c, &out_f);
+                                    let ny = Self::undistort_coord(position + Vector2::new(0.0, eps), params, matrices, distortion_model, digital_lens, &mesh_data, &out_c, &out_f);
                                     if let (Some(nx), Some(ny)) = (nx, ny) {
                                         let xyx = nx - uv;
                                         let xyy = ny - uv;
@@ -616,24 +804,7 @@ impl Stabilization {
                                     }
                                 }
 
-                                let width_f = params.width as f32;
-                                let height_f = params.height as f32;
                                 if params.background_mode == 3 { // Margin with feather
-                                    let widthf  = width_f - 1.0;
-                                    let heightf = height_f - 1.0;
-
-                                    let feather = (params.background_margin_feather * heightf).max(0.0001);
-                                    let mut pt2 = uv;
-                                    let mut alpha = 1.0;
-                                    if (uv.x > widthf - feather) || (uv.x < feather) || (uv.y > heightf - feather) || (uv.y < feather) {
-                                        alpha = ((widthf - uv.x).min(heightf - uv.y).min(uv.x).min(uv.y) / feather).min(1.0).max(0.0);
-                                        let size_f = Vector2::new(width_f, height_f);
-                                        let half = Vector2::from_element(0.5);
-                                        pt2.component_div_assign(&size_f);
-                                        pt2 = ((pt2 - half) * (1.0 - params.background_margin)) + half;
-                                        pt2.component_mul_assign(&size_f);
-                                    }
-
                                     let mut frame_size = (params.width as f32, params.height as f32);
                                     if params.input_rotation != 0.0 {
                                         let rotation = params.input_rotation * (std::f32::consts::PI / 180.0);
@@ -641,6 +812,25 @@ impl Stabilization {
                                         frame_size = rotate_point(size, rotation, (0.0, 0.0), (0.0, 0.0));
                                         frame_size = (frame_size.0.abs().round(), frame_size.1.abs().round());
                                     }
+                                    // `uv` is in the input frame, turned by the input rotation, so the margin follows `frame_size`.
+                                    // Pixel centres are on whole coordinates, so the picture spans 0 ..= size - 1
+                                    let widthf  = frame_size.0 - 1.0;
+                                    let heightf = frame_size.1 - 1.0;
+
+                                    // A fraction of the picture's own height, whichever way the input buffer is turned
+                                    let feather = (params.background_margin_feather * (params.height as f32 - 1.0)).max(0.0001);
+                                    let mut pt2 = uv;
+                                    let mut alpha = 1.0;
+                                    if (uv.x > widthf - feather) || (uv.x < feather) || (uv.y > heightf - feather) || (uv.y < feather) {
+                                        alpha = ((widthf - uv.x).min(heightf - uv.y).min(uv.x).min(uv.y) / feather).min(1.0).max(0.0);
+                                        // Pulled towards the middle of that span, so the margin is the same on both sides
+                                        let size_f = Vector2::new(widthf, heightf);
+                                        let half = Vector2::from_element(0.5);
+                                        pt2.component_div_assign(&size_f);
+                                        pt2 = ((pt2 - half) * (1.0 - params.background_margin)) + half;
+                                        pt2.component_mul_assign(&size_f);
+                                    }
+
                                     uv  = Vector2::new(map_coord(uv.x,  0.0, frame_size.0, params.source_rect[0] as f32, (params.source_rect[0] + params.source_rect[2]) as f32),
                                                        map_coord(uv.y,  0.0, frame_size.1, params.source_rect[1] as f32, (params.source_rect[1] + params.source_rect[3]) as f32));
                                     pt2 = Vector2::new(map_coord(pt2.x, 0.0, frame_size.0, params.source_rect[0] as f32, (params.source_rect[0] + params.source_rect[2]) as f32),
@@ -685,35 +875,78 @@ impl Stabilization {
     }
 }
 
-pub fn undistort_points_with_rolling_shutter(distorted: &[(f32, f32)], timestamp_ms: f64, frame: Option<usize>, params: &ComputeParams, lens_correction_amount: f64, use_fovs: bool, clamp_to_image_circle: bool) -> Vec<(f32, f32)> {
+/// Source pixels -> their positions in the output frame: the picture's own outline, which is what the zoom
+/// search fits the frame into, what the sync matches features in and what the STMap export writes.
+///
+/// `clamp_to_field` is what the two kinds of caller disagree about, and the reason it is theirs to say:
+/// where the lens has no image of a point, the zoom search still wants a boundary point in that direction
+/// (a frame corner outside the image circle is still a corner it has to fit around), and the sync wants
+/// nothing at all - a stand-in ray at the edge of the field is a displacement nobody measured, and on a
+/// fisheye whose image circle sits inside the frame it lands *inside* the frame, passes the callers' own
+/// "is it in view" test and feeds the offset search a match that was never there
+pub fn undistort_points_with_rolling_shutter(distorted: &[(f32, f32)], timestamp_ms: f64, frame: Option<usize>, params: &ComputeParams, lens_correction_amount: f64, use_fovs: bool, clamp_to_field: bool) -> Vec<(f32, f32)> {
     if distorted.is_empty() { return Vec::new(); }
-    let (camera_matrix, distortion_coeffs, _p, rotations, is, mesh, fov, r_limit) = FrameTransform::at_timestamp_for_points(params, distorted, timestamp_ms, frame, use_fovs);
+    let (camera_matrix, distortion_coeffs, new_k, rotations, is, mesh, fov, field_limit, breathing) = FrameTransform::at_timestamp_for_points(params, distorted, timestamp_ms, frame, use_fovs);
 
-    undistort_points(distorted, camera_matrix, &distortion_coeffs, rotations[0], Some(Matrix3::identity()), Some(rotations), params, lens_correction_amount, fov, timestamp_ms, is, mesh, if clamp_to_image_circle { r_limit } else { 0.0 })
+    undistort_points(distorted, camera_matrix, &distortion_coeffs, rotations[0], Some(new_k), Some(rotations), params, lens_correction_amount, fov, timestamp_ms, is, mesh, field_limit, breathing, clamp_to_field)
 }
-pub fn undistort_points_for_optical_flow(distorted: &[(f32, f32)], timestamp_us: i64, params: &ComputeParams, points_dims: (u32, u32)) -> Vec<(f32, f32)> {
+/// Optical flow features -> the bearings they arrived on: unit ray directions in the camera's own frame,
+/// `None` where the lens has no image of the feature.
+///
+/// Bearings, and deliberately not positions on an image plane: the output projection describes the picture
+/// Gyroflow *draws*, not the camera that recorded it, and [`OutputProjection::for_lens`] picks a
+/// stereographic one for every lens whose frame reaches past 85° from the axis. Pose estimation and the
+/// rolling-shutter sync read a 2D answer as `(x, y, 1)`, so under that projection a 60° ray would reach
+/// them as a 49.1° one and every rotation they solve for would come out short.
+///
+/// [`OutputProjection::for_lens`]: super::projection::OutputProjection::for_lens
+pub fn undistort_points_for_optical_flow(distorted: &[(f32, f32)], timestamp_us: i64, params: &ComputeParams, points_dims: (u32, u32)) -> Vec<Option<(f32, f32, f32)>> {
+    if distorted.is_empty() { return Vec::new(); }
+    let timestamp_ms = timestamp_us as f64 / 1000.0;
     let img_dim_ratio = points_dims.0 as f64 / params.width.max(1) as f64;//FrameTransform::get_ratio(params);
 
-    let (camera_matrix, distortion_coeffs, _, _, _, _) = FrameTransform::get_lens_data_at_timestamp(params, timestamp_us as f64 / 1000.0, false);
+    let (camera_matrix, distortion_coeffs, _, _, _, _, _) = FrameTransform::get_lens_data_at_timestamp(params, timestamp_ms, false);
 
-    let scaled_k = camera_matrix * img_dim_ratio;
+    // The features were tracked on a frame of their own size, so the lens is read at that scale - and so is
+    // the digital lens, which works in whole pixels of the frame it is handed
+    let mut kernel_params = point_kernel_params(params, camera_matrix * img_dim_ratio, distortion_coeffs, 0.0, timestamp_ms);
+    kernel_params.width  = points_dims.0 as i32; kernel_params.output_width  = points_dims.0 as i32;
+    kernel_params.height = points_dims.1 as i32; kernel_params.output_height = points_dims.1 as i32;
 
-    // Optical flow matches real image features, so no image-circle clamping here - see `undistort_points`.
-    undistort_points(distorted, scaled_k, &distortion_coeffs, Matrix3::identity(), None, None, params, 1.0, 1.0, timestamp_us as f64 / 1000.0, None, None, 0.0)
+    // Optical flow matches real image features in the camera's own frame: no rotation into an output camera,
+    // no field clamp, no zoom - just the lens, undone
+    undistort_points_to_rays(distorted, &kernel_params, Matrix3::identity(), None, params, None, None, None, false)
+        .into_iter()
+        .map(|ray| ray.map(projection::ray_to_dir).filter(|d| d.0.is_finite() && d.1.is_finite() && d.2.is_finite()))
+        .collect()
 }
-// Ported from OpenCV: https://github.com/opencv/opencv/blob/4.x/modules/calib3d/src/fisheye.cpp#L321
-pub fn undistort_points(distorted: &[(f32, f32)], camera_matrix: Matrix3<f64>, distortion_coeffs: &[f64; 12], rotation: Matrix3<f64>, p: Option<Matrix3<f64>>, rot_per_point: Option<Vec<Matrix3<f64>>>, params: &ComputeParams, lens_correction_amount: f64, fov: f64, timestamp_ms: f64, shift_per_point: Option<Vec<(f32, f32, f32, f32, f32)>>, mesh: Option<Vec<f64>>, r_limit: f64) -> Vec<(f32, f32)> {
-    let f = (camera_matrix[(0, 0)] as f32, camera_matrix[(1, 1)] as f32);
-    let c = (camera_matrix[(0, 2)] as f32, camera_matrix[(1, 2)] as f32);
-    let r_limit = r_limit as f32;
+/// [`undistort_points_for_optical_flow`] with everything else the render undoes on the source side of `frame`: its
+/// mesh correction, the sensor and lens shifts of in-body and optical stabilization, and lens breathing (when it's
+/// on). What the picture moved by beyond these is the camera's own rotation, which is what `optical_motion`
+/// measures - a sensor shift taken for one would be corrected twice, once as the shift and once as the rotation.
+///
+/// The per-frame data is in pixels of the frame itself, so the features are taken there first.
+pub fn undistort_points_for_optical_motion(distorted: &[(f32, f32)], timestamp_ms: f64, frame: usize, params: &ComputeParams, points_dims: (u32, u32)) -> Vec<Option<(f32, f32, f32)>> {
+    if distorted.is_empty() { return Vec::new(); }
+    let scale = (params.width as f32 / points_dims.0.max(1) as f32, params.height as f32 / points_dims.1.max(1) as f32);
+    let full: Vec<(f32, f32)> = distorted.iter().map(|p| (p.0 * scale.0, p.1 * scale.1)).collect();
 
-    let mut rr = rotation;
-    if let Some(p) = p { // PP
-        rr = p * rr;
-    }
+    // `use_fovs` is what brings lens breathing in, the magnification `at_timestamp` applies on the source side; the
+    // zoom it's otherwise about isn't read here
+    let (camera_matrix, distortion_coeffs, _, _, shifts, mesh, _, _, breathing) = FrameTransform::at_timestamp_for_points(params, &full, timestamp_ms, Some(frame), true);
+    // Without rolling shutter correction the shift is looked up once, for the whole frame
+    let shifts = shifts.map(|s| if s.len() == 1 { vec![s[0]; full.len()] } else { s });
 
-    let light_refraction_coefficient = params.keyframes.value_at_video_timestamp(&crate::KeyframeType::LightRefractionCoeff, timestamp_ms).unwrap_or(params.light_refraction_coefficient) as f32;
+    let kernel_params = point_kernel_params(params, camera_matrix, distortion_coeffs, 0.0, timestamp_ms);
+    undistort_points_to_rays(&full, &kernel_params, Matrix3::identity(), None, params, shifts.as_deref(), mesh.as_deref(), breathing.as_deref(), false)
+        .into_iter()
+        .map(|ray| ray.map(projection::ray_to_dir).filter(|d| d.0.is_finite() && d.1.is_finite() && d.2.is_finite()))
+        .collect()
+}
 
+/// The block the point path evaluates the lens with: the same one the render fills per frame, minus
+/// everything that is about pixels rather than about the lens
+fn point_kernel_params(params: &ComputeParams, camera_matrix: Matrix3<f64>, distortion_coeffs: [f64; 24], field_limit: f64, timestamp_ms: f64) -> KernelParams {
     let mut digital_lens_params = [0f32; 16];
     if let Some(p) = &params.digital_lens_params {
         for (i, v) in p.iter().take(16).enumerate() {
@@ -722,32 +955,49 @@ pub fn undistort_points(distorted: &[(f32, f32)], camera_matrix: Matrix3<f64>, d
     }
 
     // TODO more params
-    let kernel_params = KernelParams {
+    KernelParams {
         width : params.width as i32,
         height: params.height as i32,
         output_width: params.output_width as i32,
         output_height: params.output_height as i32,
-        f: [f.0, f.1],
-        c: [c.0, c.1],
+        f: [camera_matrix[(0, 0)] as f32, camera_matrix[(1, 1)] as f32],
+        c: [camera_matrix[(0, 2)] as f32, camera_matrix[(1, 2)] as f32],
         k: distortion_coeffs.iter().map(|x| *x as f32).collect::<Vec<_>>().try_into().unwrap(),
         digital_lens_params,
-        light_refraction_coefficient,
+        light_refraction_coefficient: params.keyframes.value_at_video_timestamp(&crate::KeyframeType::LightRefractionCoeff, timestamp_ms).unwrap_or(params.light_refraction_coefficient) as f32,
+        // The model has to reach exactly as far here as it does in the render, or the lens-correction
+        // solve measures a field the picture doesn't have
+        field_limit: field_limit as f32,
+        output_projection: params.output_projection,
 
         ..Default::default()
+    }
+}
+
+/// Source pixels -> the rays they arrived on, in the output camera's frame, as angle vectors (see
+/// `stabilization::projection`); `None` where the lens has no image of the point.
+///
+/// The half of the point path that is about the camera and not about the picture: [`undistort_points`] goes
+/// on to project these onto the output plane, the sync reads them as bearings.
+fn undistort_points_to_rays(distorted: &[(f32, f32)], kernel_params: &KernelParams, rotation: Matrix3<f64>, rot_per_point: Option<&[Matrix3<f64>]>, params: &ComputeParams, shift_per_point: Option<&[(f32, f32, f32, f32, f32)]>, mesh: Option<&[f64]>, breathing_per_point: Option<&[f32]>, clamp_to_field: bool) -> Vec<Option<(f32, f32)>> {
+    let f = (kernel_params.f[0], kernel_params.f[1]);
+    let c = (kernel_params.c[0], kernel_params.c[1]);
+    // Only the picture's own outline gets the edge-of-field stand-in below; a caller measuring real image
+    // features (the sync) has to hear "no image here" instead of a ray nothing arrived on
+    let field_limit = if clamp_to_field { kernel_params.field_limit } else { 0.0 };
+
+    // Snell's law backwards - the inverse of what `rotate_and_distort` applies going the other way
+    let refract = |ray: (f32, f32)| -> (f32, f32) {
+        let n = kernel_params.light_refraction_coefficient;
+        if n == 1.0 || n <= 0.0 { return ray; }
+        let theta = (ray.0 * ray.0 + ray.1 * ray.1).sqrt();
+        if theta < 1e-12 { return ray; }
+        // A ray from behind the flat port never entered the housing: hold it at the edge of Snell's window
+        let s = (theta.min(std::f32::consts::FRAC_PI_2).sin() / n).clamp(-1.0, 1.0).asin() / theta;
+        (ray.0 * s, ray.1 * s)
     };
 
-    // Lens-correction blend constants — point-independent, so compute once instead of per point.
-    let lens_correction = if lens_correction_amount < 1.0 {
-        // Match the render's lens-correction EXACTLY: out_c = output/2 (no input-stretch division) and
-        // out_f = (f/fov)/factor — see undistort.frag and the undistort_coord render mirror above.
-        let out_c = (params.output_width as f32 / 2.0, params.output_height as f32 / 2.0);
-        let amount = lens_correction_amount as f32;
-        let factor = (1.0 - amount).max(0.001);
-        let out_f = (f.0 / fov as f32 / factor, f.1 / fov as f32 / factor);
-        Some((out_c, amount, factor, out_f))
-    } else { None };
-
-    // Not parallelized here: the only caller that reaches the lens-correction block below
+    // Not parallelized here: the only caller that reaches the lens-correction blend
     // (zooming::fov_iterative) already runs this across frames via into_par_iter, and the
     // stmap caller passes one point at a time — so a nested par_iter would only oversubscribe.
     distorted.iter().enumerate().map(|(index, pi)| {
@@ -763,15 +1013,15 @@ pub fn undistort_points(distorted: &[(f32, f32)], camera_matrix: Matrix3<f64>, d
             }
         }
 
-        if let Some(mesh_data) = &mesh {
+        if let Some(mesh_data) = mesh.filter(|m| m.len() > 9) {
             // FocalPlaneDistortion
-            if mesh_data[0] > 0.0 && mesh_data[mesh_data[0] as usize] > 0.0 {
-                let o = mesh_data[0] as usize; // offset to focal plane distortion data
+            let o = mesh_data[0] as usize; // offset to focal plane distortion data
+            if o > 0 && mesh_data.get(o).map_or(false, |x| *x > 0.0) {
 
                 let mesh_size = (mesh_data[3], mesh_data[4]);
                 let origin    = (mesh_data[5] as f32, mesh_data[6] as f32);
                 let crop_size = (mesh_data[7] as f32, mesh_data[8] as f32);
-                let stblz_grid = mesh_size.1 / 8.0;
+                let stblz_grid = if mesh_data[o + 2] > 0.0 { mesh_data[o + 2] } else { mesh_size.1 / 8.0 }; // band height comes with the table
 
                 x = map_coord(x, 0.0, params.width  as f32, origin.0, origin.0 + crop_size.0);
                 y = map_coord(y, 0.0, params.height as f32, origin.1, origin.1 + crop_size.1);
@@ -803,129 +1053,150 @@ pub fn undistort_points(distorted: &[(f32, f32)], camera_matrix: Matrix3<f64>, d
                 y = map_coord(new_pos.y as f32, origin.1, origin.1 + crop_size.1, 0.0, params.height as f32);
             }
         }
-        if let Some(shift) = shift_per_point.as_ref().and_then(|v| v.get(index)) {
+        if let Some(shift) = shift_per_point.and_then(|v| v.get(index)) {
+            // Sensor roll around the principal point first, then the sensor/lens shift (the inverse of `rotate_and_distort`)
             let ang_rad = shift.2;
             let cos_a = ang_rad.cos();
             let sin_a = ang_rad.sin();
-            x = x - c.0 - shift.3 + shift.0;
-            y = y - c.1 - shift.4 + shift.1;
-            x = cos_a * x - sin_a * y + c.0;
-            y = sin_a * x + cos_a * y + c.1;
+            let (xr, yr) = (x - c.0, y - c.1);
+            x = cos_a * xr - sin_a * yr - shift.3 + shift.0 + c.0;
+            y = sin_a * xr + cos_a * yr - shift.4 + shift.1 + c.1;
         }
 
-        let pw = ((x - c.0) / f.0, (y - c.1) / f.1); // world point
+        let mut pw = ((x - c.0) / f.0, (y - c.1) / f.1); // normalized image point
+        // Focus breathing is a magnification of the source image (`at_timestamp` applies it there too), so
+        // undoing it is a division, before the lens model is asked for the ray
+        if let Some(bz) = breathing_per_point.and_then(|v| v.get(index).or(v.first())).filter(|k| **k > 0.0) {
+            pw = (pw.0 / bz, pw.1 / bz);
+        }
 
-        let rot = nalgebra::convert::<nalgebra::Matrix3<f64>, nalgebra::Matrix3<f32>>(*rot_per_point.as_ref().and_then(|v| v.get(index)).unwrap_or(&rr));
+        let rot = nalgebra::convert::<nalgebra::Matrix3<f64>, nalgebra::Matrix3<f32>>(*rot_per_point.and_then(|v| v.get(index)).unwrap_or(&rotation));
 
+        // Source image -> ray, as an angle vector (see `stabilization::projection`)
         let ray = match params.distortion_model.undistort_point(pw, &kernel_params) {
-            Some(mut pt) => {
-                if kernel_params.light_refraction_coefficient != 1.0 && kernel_params.light_refraction_coefficient > 0.0 {
-                    let r = (pt.0.powi(2) + pt.1.powi(2)).sqrt();
-                    if r != 0.0 {
-                        let sin_theta_d = (r / (1.0 + r * r).sqrt()) / kernel_params.light_refraction_coefficient;
-                        let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                        let factor = r_d / r;
-                        pt.0 *= factor;
-                        pt.1 *= factor;
-                    }
-                }
-                if r_limit > 0.0 {
-                    let r = (pt.0.powi(2) + pt.1.powi(2)).sqrt();
-                    if r > r_limit {
-                        pt = (pt.0 * (r_limit / r), pt.1 * (r_limit / r));
-                    }
-                }
-                Some(pt)
-            },
-            None if r_limit > 0.0 => {
-                let r = (pw.0.powi(2) + pw.1.powi(2)).sqrt();
-                if r > 0.0 { Some((pw.0 * (r_limit / r), pw.1 * (r_limit / r))) } else { None }
+            Some(pt) => Some(refract(pt)),
+            // No image of this point: hold the direction at the edge of the lens's field, so a frame corner
+            // outside the image circle still gives the zoom search a boundary point in the right direction
+            None if field_limit > 0.0 => {
+                let r = (pw.0 * pw.0 + pw.1 * pw.1).sqrt();
+                if r > 1e-12 { Some((pw.0 * (field_limit / r), pw.1 * (field_limit / r))) } else { None }
             },
             None => None
         };
 
-        if let Some(ray) = ray {
-            // reproject
-            let pr = rot * nalgebra::Vector3::new(ray.0, ray.1, 1.0); // rotated point optionally multiplied by new camera matrix
-            if !(pr[2] > 0.0) {
-                return INVALID_POINT;
-            }
-            let mut pt = (pr[0] / pr[2], pr[1] / pr[2]);
+        // Rotate into the output camera; the rest of the way - onto its image plane - is the caller's
+        ray.map(|ray| {
+            let d = projection::ray_to_dir(ray);
+            let pr = rot * nalgebra::Vector3::new(d.0, d.1, d.2);
+            projection::dir_to_ray((pr[0], pr[1], pr[2]))
+        })
+    }).collect()
+}
 
-            if let Some((out_c, amount, factor, out_f)) = lens_correction {
-                // The digital warp is applied FOV-independently (un-zoom -> warp -> re-zoom below), so the
-                // corrected frame shape is a pure uniform scale in fov — the zoom search and the cached debug
-                // overlay both use the use_fovs=false `fov`, and the live FOV is a uniform scale at draw time.
-                //
-                // The render samples at  texPos_used = lerp(R(o), o, amount), where R(o) is applied FORWARD to
-                // the in-frame output pixel o:  R = digital_undistort -> /out_f -> radial undistort -> *out_f
-                // (undistort.frag). `pt` is that texPos_used, so the output position o of this source point is the
-                // solution of  amount*o + (1-amount)*R(o) = pt. We solve it with Newton, evaluating R FORWARD —
-                // digital_undistort is a direct polynomial (finite even out-of-domain) and radial undistort is
-                // well-defined, so this never blows up. (The old closed-form inverse fed the rectilinear,
-                // far-out-of-frame `pt` into the digital *inverse*, which diverged to NaN for lc>0.)
-                let r_of = |o: (f32, f32)| -> (f32, f32) {
-                    let mut q = o;
-                    if let Some(digital) = &params.digital_lens {
-                        // FOV-independent digital warp: un-zoom -> warp -> re-zoom.
-                        let uz = ((q.0 - out_c.0) * fov as f32 + out_c.0, (q.1 - out_c.1) * fov as f32 + out_c.1);
-                        if let Some(d) = digital.undistort_point(uz, &kernel_params) {
-                            q = ((d.0 - out_c.0) / fov as f32 + out_c.0, (d.1 - out_c.1) / fov as f32 + out_c.1);
-                        }
-                    }
-                    let mut n = ((q.0 - out_c.0) / out_f.0, (q.1 - out_c.1) / out_f.1);
-                    if let Some(d) = params.distortion_model.undistort_point(n, &kernel_params) { n = d; }
-                    if kernel_params.light_refraction_coefficient != 1.0 && kernel_params.light_refraction_coefficient > 0.0 {
-                        let r = (n.0 * n.0 + n.1 * n.1).sqrt();
-                        if r != 0.0 {
-                            let sin_theta_d = (r / (1.0 + r * r).sqrt()) / kernel_params.light_refraction_coefficient;
-                            let r_d = sin_theta_d / (1.0 - sin_theta_d * sin_theta_d).sqrt();
-                            let s = r_d / r;
-                            n = (n.0 * s, n.1 * s);
-                        }
-                    }
-                    ((n.0 * out_f.0) + out_c.0, (n.1 * out_f.1) + out_c.1)
-                };
+// Ported from OpenCV: https://github.com/opencv/opencv/blob/4.x/modules/calib3d/src/fisheye.cpp#L321
+pub fn undistort_points(distorted: &[(f32, f32)], camera_matrix: Matrix3<f64>, distortion_coeffs: &[f64; 24], rotation: Matrix3<f64>, p: Option<Matrix3<f64>>, rot_per_point: Option<Vec<Matrix3<f64>>>, params: &ComputeParams, lens_correction_amount: f64, fov: f64, timestamp_ms: f64, shift_per_point: Option<Vec<(f32, f32, f32, f32, f32)>>, mesh: Option<Vec<f64>>, field_limit: f64, breathing_per_point: Option<Vec<f32>>, clamp_to_field: bool) -> Vec<(f32, f32)> {
+    // The rotations act on ray *directions* now, so the output camera matrix is no longer folded into
+    // them: `p` is that matrix, applied to the projected plane point at the very end
+    let (out_f, out_c) = match p {
+        Some(m) => ((m[(0, 0)] as f32, m[(1, 1)] as f32), (m[(0, 2)] as f32, m[(1, 2)] as f32)),
+        None    => ((1.0, 1.0), (0.0, 0.0))
+    };
 
-                // Initial guess: the old closed-form inverse blended toward pt (exact at amount=0 and amount→1),
-                // falling back to pt where the inverse digital warp is out-of-domain.
-                let inv = {
-                    let n = ((pt.0 - out_c.0) / out_f.0, (pt.1 - out_c.1) / out_f.1);
-                    let d = params.distortion_model.distort_point(n.0, n.1, 1.0, &kernel_params);
-                    let mut p2 = ((d.0 * out_f.0) + out_c.0, (d.1 * out_f.1) + out_c.1);
-                    if let Some(digital) = &params.digital_lens {
-                        let uz = ((p2.0 - out_c.0) * fov as f32 + out_c.0, (p2.1 - out_c.1) * fov as f32 + out_c.1);
-                        let dd = digital.distort_point(uz.0, uz.1, 1.0, &kernel_params);
-                        p2 = ((dd.0 - out_c.0) / fov as f32 + out_c.0, (dd.1 - out_c.1) / fov as f32 + out_c.1);
-                    }
-                    p2
-                };
-                let mut o = if inv.0.is_finite() && inv.1.is_finite() {
-                    (inv.0 * factor + pt.0 * amount, inv.1 * factor + pt.1 * amount)
-                } else { pt };
+    let kernel_params = point_kernel_params(params, camera_matrix, *distortion_coeffs, field_limit, timestamp_ms);
+    let field_limit = kernel_params.field_limit;
+    let amount = lens_correction_amount as f32;
+    let proj = params.output_projection;
 
-                // Newton: g(o) = amount*o + (1-amount)*R(o) - pt = 0
-                for _ in 0..10 {
-                    let r = r_of(o);
-                    let g = (amount * o.0 + factor * r.0 - pt.0, amount * o.1 + factor * r.1 - pt.1);
-                    if g.0.abs() < 0.02 && g.1.abs() < 0.02 { break; }
-                    let eps = 1.0_f32;
-                    let rx = r_of((o.0 + eps, o.1));
-                    let ry = r_of((o.0, o.1 + eps));
-                    let j11 = amount + factor * (rx.0 - r.0) / eps; let j21 = factor * (rx.1 - r.1) / eps;
-                    let j12 = factor * (ry.0 - r.0) / eps;          let j22 = amount + factor * (ry.1 - r.1) / eps;
-                    let det = j11 * j22 - j12 * j21;
-                    if !det.is_finite() || det.abs() < 1e-9 { break; }
-                    let dx = ( j22 * g.0 - j12 * g.1) / det;
-                    let dy = (-j21 * g.0 + j11 * g.1) / det;
-                    if !dx.is_finite() || !dy.is_finite() { break; }
-                    o = (o.0 - dx, o.1 - dy);
-                }
-                pt = o;
-            }
-            pt
-        } else {
-            INVALID_POINT
+    let refr = kernel_params.light_refraction_coefficient != 1.0 && kernel_params.light_refraction_coefficient > 0.0;
+    // Where the blend's source leg ends: the lens's field limit - under water, Snell's window, the inverse
+    // of Snell's law away. Below `1.0` the render draws background past it (its bracket ends there), so a
+    // ray the rotation carried past it holds at the edge, the way a source point past the field limit does
+    let cap = {
+        let fl = if field_limit > 0.0 { field_limit } else { std::f32::consts::PI };
+        if refr { (fl.min(std::f32::consts::FRAC_PI_2).sin() / kernel_params.light_refraction_coefficient).clamp(-1.0, 1.0).asin() } else { fl }
+    };
+
+    // Ray (in the output camera's frame) -> where it lands on the output plane: `(1-a)·R(θ) + a·P(θ)`,
+    // the lens-correction blend in the direction where it is a closed form (see `super::projection`).
+    // `R` carries the refraction, because the render applies it on this side of the blend too
+    let blend_forward = |ray_out: (f32, f32)| -> (f32, f32) {
+        let mut theta = (ray_out.0 * ray_out.0 + ray_out.1 * ray_out.1).sqrt();
+        if theta < 1e-12 { return (0.0, 0.0); }
+        let u = (ray_out.0 / theta, ray_out.1 / theta);
+        if amount < 1.0 { theta = theta.min(cap); }
+        let rp = projection::radius_of_theta(theta, proj);
+        if amount >= 1.0 { return (u.0 * rp, u.1 * rp); }
+        let mut th = theta;
+        if refr {
+            th = (th.sin() * kernel_params.light_refraction_coefficient).clamp(-1.0, 1.0).asin();
         }
+        let (s, c) = (th.sin(), th.cos());
+        // The whole vector, not just its length: the tangential terms move the source point off its own
+        // radius, and at amount 0 this has to come back exactly to the pixel it started from
+        let p = params.distortion_model.distort_point(u.0 * s, u.1 * s, c, &kernel_params);
+        ((1.0 - amount) * p.0 + amount * u.0 * rp, (1.0 - amount) * p.1 + amount * u.1 * rp)
+    };
+
+    let rays = undistort_points_to_rays(distorted, &kernel_params, rotation, rot_per_point.as_deref(), params, shift_per_point.as_deref(), mesh.as_deref(), breathing_per_point.as_deref(), clamp_to_field);
+
+    rays.into_iter().map(|ray| {
+        let Some(ray_out) = ray else { return INVALID_POINT };
+
+        let n = blend_forward(ray_out);
+        if !n.0.is_finite() || !n.1.is_finite() { return INVALID_POINT; }
+        let mut out = (n.0 * out_f.0 + out_c.0, n.1 * out_f.1 + out_c.1);
+
+        // The digital warp, which the render undoes on its way in (FOV-independently: un-zoom -> warp
+        // -> re-zoom). The render mixes its target as `(1-a)·U(out) + a·out`, so that both ends stay
+        // exact, and `out` has to be the pixel the render reads this `nb` from - which between the
+        // ends is not the warp simply put back on `nb`
+        if amount < 1.0 && let Some(digital) = &params.digital_lens {
+            let fov = fov as f32;
+            let unwarp = |q: (f32, f32)| -> Option<(f32, f32)> {
+                let uz = ((q.0 - out_c.0) * fov + out_c.0, (q.1 - out_c.1) * fov + out_c.1);
+                digital.undistort_point(uz, &kernel_params).map(|d| ((d.0 - out_c.0) / fov + out_c.0, (d.1 - out_c.1) / fov + out_c.1))
+            };
+            // The warp put back the same way: the answer at 0, and the start elsewhere
+            let nb = out;
+            let uz = ((nb.0 - out_c.0) * fov + out_c.0, (nb.1 - out_c.1) * fov + out_c.1);
+            let d = digital.distort_point(uz.0, uz.1, 1.0, &kernel_params);
+            // A digital warp is a polynomial map inverted by iteration, and a point far enough outside the
+            // frame it was fitted to has no answer to give: the warps say so with the off-frame sentinel,
+            // and where the iteration simply left for infinity it says NaN. Neither is a position, and a
+            // NaN reported as one is worse than no answer at all - it goes into the zoom polygon, where
+            // every comparison against it is false and the frame corner quietly stops being a corner
+            if d.0 <= -99998.0 || !d.0.is_finite() || !d.1.is_finite() { return INVALID_POINT; }
+            out = ((d.0 - out_c.0) / fov + out_c.0, (d.1 - out_c.1) / fov + out_c.1);
+            if amount > 0.0 {
+                // Newton on `(1-a)·U(out) + a·out - nb`, the warp's Jacobian by differences: the warps
+                // are low-order polynomials, so this converges in a few steps from that start. Safeguarded
+                // on the way: it keeps the best iterate it has measured rather than the last one it took,
+                // so a step that leaves the warp's domain cannot turn a usable answer into a NaN
+                let residual = |q: (f32, f32)| -> Option<(f32, f32)> {
+                    let u = unwarp(q)?;
+                    let r = ((1.0 - amount) * u.0 + amount * q.0 - nb.0, (1.0 - amount) * u.1 + amount * q.1 - nb.1);
+                    (r.0.is_finite() && r.1.is_finite()).then_some(r)
+                };
+                const H: f32 = 0.5;
+                let (mut best, mut best_err) = (out, f32::INFINITY);
+                for _ in 0..8 {
+                    let Some(f0) = residual(out) else { break };
+                    let err = f0.0.abs().max(f0.1.abs());
+                    if err < best_err { best = out; best_err = err; }
+                    if f0.0.abs() < 1e-3 && f0.1.abs() < 1e-3 { break; }
+                    let (Some(fx), Some(fy)) = (residual((out.0 + H, out.1)), residual((out.0, out.1 + H))) else { break };
+                    let (j00, j10) = ((fx.0 - f0.0) / H, (fx.1 - f0.1) / H);
+                    let (j01, j11) = ((fy.0 - f0.0) / H, (fy.1 - f0.1) / H);
+                    let det = j00 * j11 - j01 * j10;
+                    if det.abs() < 1e-12 { break; }
+                    out.0 -= (j11 * f0.0 - j01 * f0.1) / det;
+                    out.1 -= (j00 * f0.1 - j10 * f0.0) / det;
+                    if !out.0.is_finite() || !out.1.is_finite() { break; }
+                }
+                out = best;
+            }
+        }
+        if !out.0.is_finite() || !out.1.is_finite() { return INVALID_POINT; }
+        out
     }).collect()
 }

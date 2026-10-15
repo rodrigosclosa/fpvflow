@@ -250,16 +250,19 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     let render_options_dict = render_options.get_encoder_options_dict();
     let hwaccel_device = render_options_dict.get("hwaccel_device");
 
-    match render_options.audio_codec.as_ref() {
-        "AAC"         => proc.audio_codec = ffmpeg_next::codec::Id::AAC,
-        "PCM (s16le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S16LE,
-        "PCM (s16be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S16BE,
-        "PCM (s24le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24LE,
-        "PCM (s24be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24BE,
+    match render_options.audio_codec.to_ascii_lowercase().as_str() {
+        "aac" | ""    => proc.audio_codec = ffmpeg_next::codec::Id::AAC,
+        "pcm (s16le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S16LE,
+        "pcm (s16be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S16BE,
+        "pcm (s24le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24LE,
+        "pcm (s24be)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_S24BE,
         // 32-bit float preserves float recorders (DJI Mic and similar) losslessly, but
         // doesn't fit in MP4 - see the compatibility check in audio_export.rs.
-        "PCM (f32le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_F32LE,
-        _ => { }
+        "pcm (f32le)" => proc.audio_codec = ffmpeg_next::codec::Id::PCM_F32LE,
+        // Copy the original audio track without re-encoding. `audio_codec` is kept as a fallback
+        // in case the output container can't store the original codec
+        "copy"        => proc.audio_copy = true,
+        other => ::log::warn!("Unknown audio codec {other:?}, using AAC")
     }
 
     let interpolation: Interpolation = render_options.interpolation.as_str().into();
@@ -900,6 +903,83 @@ pub fn render<F, F2>(stab: Arc<StabilizationManager>, progress: F, input_file: &
     Ok(())
 }
 
+/// "Analyze image optically" (Motion data -> Optical correction): decodes the trim ranges (the whole clip without any)
+/// at about 1000 px wide, tracks them and fits the correction to what they measured, see
+/// `synchronization::optical_motion`. Blocking. `progress` gets the fraction done, and the frames done and in all.
+/// Waits while `pause_flag` is up. Cancelled - by `cancel_flag`, or by another file, a project or Clear replacing what
+/// it measures - it stops decoding and returns "Cancelled"; the first error stops it too
+pub fn analyze_optically(stab: &StabilizationManager, cancel_flag: Arc<AtomicBool>, pause_flag: Option<Arc<AtomicBool>>, progress: impl Fn(f64, usize, usize) + 'static) -> Result<(), String> {
+    use fpvflow_core::synchronization::optical_motion::OpticalMotionAnalysis;
+    use std::sync::atomic::Ordering::Relaxed;
+    let analysis = OpticalMotionAnalysis::from_manager(stab, cancel_flag.clone())?;
+    let size = stab.params.read().size;
+    if size.0 == 0 || size.1 == 0 { return Err("Video is not loaded".into()); }
+    let input_file = stab.input_file.read().clone();
+    let gpu_decoding = stab.gpu_decoding.load(std::sync::atomic::Ordering::SeqCst);
+    // Only the trim ranges
+    let ranges = analysis.ranges_ms();
+    // About 1000 px wide is enough: the tracks are averaged over thousands of points per frame
+    let tw = size.0.min(960) as u32;
+    let th = (((size.1 as f64 * tw as f64 / size.0 as f64) / 2.0).round() * 2.0) as u32;
+
+    let mut decoder_options = ffmpeg_next::Dictionary::new();
+    if input_file.image_sequence_fps > 0.0 {
+        let fps = fps_to_rational(input_file.image_sequence_fps);
+        decoder_options.set("framerate", &format!("{}/{}", fps.numerator(), fps.denominator()));
+    }
+    if input_file.image_sequence_start > 0 {
+        decoder_options.set("start_number", &format!("{}", input_file.image_sequence_start));
+    }
+    decoder_options.set("scale", &format!("{tw}x{th}"));
+
+    let analysis = Rc::new(RefCell::new(analysis));
+    let error = Rc::new(RefCell::new(None::<String>));
+    // What the decoder stops on: the analysis cancelled (it knows of more than `cancel_flag`), or the first error.
+    // Every frame after that would be decoded for nothing
+    let stop = Arc::new(AtomicBool::new(false));
+    match VideoProcessor::from_file(&input_file.url, gpu_decoding, 0, Some(decoder_options)) {
+        Ok(mut proc) => {
+            let (analysis2, error2, stop2) = (analysis.clone(), error.clone(), stop.clone());
+            let mut last_progress = std::time::Instant::now();
+            proc.on_frame(move |timestamp_us, input_frame, _output_frame, converter, _rate_control| {
+                if let Some(pause_flag) = &pause_flag {
+                    while pause_flag.load(Relaxed) && !cancel_flag.load(Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                let mut a = analysis2.borrow_mut();
+                if stop2.load(Relaxed) || a.is_cancelled() {
+                    stop2.store(true, Relaxed);
+                    return Ok(());
+                }
+                let result = converter.scale(input_frame, Pixel::GRAY8, tw, th).map_err(|e| e.to_string()).and_then(|small_frame| {
+                    let (width, height, stride, pixels) = (small_frame.plane_width(0), small_frame.plane_height(0), small_frame.stride(0), small_frame.data(0));
+                    a.feed_frame(timestamp_us, width, height, stride, pixels)
+                });
+                if let Err(e) = result {
+                    error2.borrow_mut().get_or_insert(e);
+                    stop2.store(true, Relaxed);
+                }
+                if last_progress.elapsed().as_millis() > 100 {
+                    last_progress = std::time::Instant::now();
+                    let (ready, total) = a.progress();
+                    progress(ready as f64 / total.max(1) as f64 * 0.99, ready, total);
+                }
+                Ok(())
+            });
+            if let Err(e) = proc.start_decoder_only(ranges, stop) {
+                error.borrow_mut().get_or_insert(e.to_string());
+            }
+        },
+        Err(e) => { error.borrow_mut().get_or_insert(e.to_string()); }
+    }
+    if analysis.borrow().is_cancelled() { return Err("Cancelled".into()); }
+    if let Some(e) = error.borrow_mut().take() { return Err(e); }
+    let analysis = Rc::try_unwrap(analysis).map_err(|_| "The decoder is still holding the analysis".to_string())?.into_inner();
+    // Kept, and fitted with the strength set
+    stab.set_optical_measurements(analysis.finish()?)
+}
+
 pub fn init_log() {
 	unsafe {
         ffi::av_log_set_level(ffi::AV_LOG_INFO);
@@ -926,10 +1006,15 @@ type VaList = ffi::va_list;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "x86_64")))]
 type VaList = *mut ffi::__va_list_tag;
 
+/// Its address in the `opaque` field of a format context drops the log messages of that context: probes whose failures are expected
+pub static SILENT_LOG: u8 = 0;
+
 #[allow(improper_ctypes_definitions)]
 unsafe extern "C" fn ffmpeg_log(avcl: *mut c_void, level: i32, fmt: *const c_char, vl: VaList) {
     unsafe {
-        if level <= ffi::av_log_get_level() {
+        let is_silent = !avcl.is_null() && *(avcl as *const *const ffi::AVClass) == ffi::avformat_get_class() &&
+                        (*(avcl as *const ffi::AVFormatContext)).opaque == &SILENT_LOG as *const u8 as *mut c_void;
+        if level <= ffi::av_log_get_level() && !is_silent {
             let mut line = vec![0u8; 2048];
             let mut prefix: i32 = *LAST_PREFIX.read();
 

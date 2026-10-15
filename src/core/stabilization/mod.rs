@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright © 2021-2022 Adrian <adrian.eddy at gmail>
 
-use std::collections::BTreeMap;
 use std::cell::RefCell;
 use std::sync::mpsc;
 
@@ -17,6 +16,7 @@ mod cpu_undistort;
 mod pixel_formats;
 // mod interpolation;
 pub mod distortion_models;
+pub mod projection;
 pub use pixel_formats::*;
 pub use compute_params::ComputeParams;
 pub use frame_transform::FrameTransform;
@@ -154,9 +154,12 @@ pub struct KernelParams {
     pub background:        [f32; 4], // 16
     pub f:                 [f32; 2], // 8  - focal length in pixels
     pub c:                 [f32; 2], // 16 - lens center
-    pub k:                 [f32; 12], // 16,16,16 - distortion coefficients
+    pub k:                 [f32; 24], // 16 x 6 - distortion coefficients
     pub fov:               f32, // 4
-    pub r_limit:           f32, // 8
+    /// The largest ray angle the source lens model can be asked for, in radians (`<= 0`: no limit).
+    /// Where the radial curve folds, or where the lens's own field ends - see
+    /// `DistortionModel::field_limit`
+    pub field_limit:       f32, // 8
     pub lens_correction_amount:   f32, // 12
     pub input_vertical_stretch:   f32, // 16
     pub input_horizontal_stretch: f32, // 4
@@ -177,8 +180,9 @@ pub struct KernelParams {
     pub pixel_value_limit:        f32, // 16
     pub light_refraction_coefficient: f32, // 4
     pub plane_index:              i32, // 8
-    pub lut_amount:               f32, // 12 - color LUT strength, 0..1
-    pub reserved2:                f32, // 16
+    /// [`crate::stabilization::projection::OutputProjection`] as `i32`
+    pub output_projection:        i32, // 12
+    pub lut_amount:               f32, // 16 - color LUT strength, 0..1
     pub ewa_coeffs_p:             [f32; 4], // 16
     pub ewa_coeffs_q:             [f32; 4], // 16
     /// Per-pixel color adjustments, applied after the LUT in Rec.709.
@@ -197,13 +201,13 @@ pub struct KernelParams {
 unsafe impl bytemuck::Zeroable for KernelParams {}
 unsafe impl bytemuck::Pod for KernelParams {}
 
-// cpu_undistort.rs transmutes this into stabilize_spirv::KernelParams, which is
-// declared separately because that crate is no_std and uses glam's Vec4. If the
-// two ever drift apart the transmute is undefined behaviour, so pin the size
-// here rather than find out at runtime.
+// stabilize_spirv::KernelParams is declared separately because that crate is
+// no_std and uses glam's Vec4; cpu_undistort.rs copies this into it field by
+// field (spirv_kernel_params). Both describe the one GPU uniform layout, so pin
+// the size here rather than find a drift at runtime.
 const _: () = assert!(
     std::mem::size_of::<KernelParams>() == std::mem::size_of::<stabilize_spirv::KernelParams>(),
-    "KernelParams and stabilize_spirv::KernelParams must stay the same size - they are transmuted"
+    "KernelParams and stabilize_spirv::KernelParams must stay the same size - they describe the same GPU layout"
 );
 
 #[derive(Default, Debug)]
@@ -222,8 +226,21 @@ impl BackendType {
     pub fn is_wgpu(&self) -> bool { matches!(self, Self::Wgpu(_)) }
 }
 
+/// The most recently used frame transforms, so the cache doesn't grow with every rendered frame (a matrix per row, ~120 kB per 4k frame)
+pub struct FrameTransformCache(lru::LruCache<i64, FrameTransform>);
+impl Default for FrameTransformCache {
+    fn default() -> Self { Self(lru::LruCache::new(std::num::NonZeroUsize::new(100).unwrap())) }
+}
+impl std::ops::Deref for FrameTransformCache {
+    type Target = lru::LruCache<i64, FrameTransform>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for FrameTransformCache {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
+
 pub struct Stabilization {
-    pub stab_data: BTreeMap<i64, FrameTransform>,
+    pub stab_data: FrameTransformCache,
 
     pub size:        (usize, usize), // width, height
     pub output_size: (usize, usize), // width, height
@@ -469,14 +486,8 @@ impl Stabilization {
         {
             let gyro = self.compute_params.gyro.read();
             let file_metadata = gyro.file_metadata.read();
-            if let Some(mc) = file_metadata.mesh_correction.get(frame) {
-                if mc.1[0] > 10.0 {
-                    kernel_flags.set(KernelParamsFlags::HAS_MESH_DATA, true);
-                }
-                if mc.1[0] > 0.0 && mc.1[mc.1[0] as usize] > 0.0 {
-                    kernel_flags.set(KernelParamsFlags::HAS_FPD_DATA, true);
-                }
-            }
+            kernel_flags.set(KernelParamsFlags::HAS_MESH_DATA, file_metadata.mesh_correction.has_mesh(frame));
+            kernel_flags.set(KernelParamsFlags::HAS_FPD_DATA, file_metadata.mesh_correction.has_focal_plane(frame));
             if file_metadata.camera_stab_data.len() > frame {
                 kernel_flags.set(KernelParamsFlags::HAS_IBIS_DATA, true);
             }
@@ -591,7 +602,7 @@ impl Stabilization {
                 transform.kernel_params.max_pixel_value = 1.0;
                 transform.kernel_params.pixel_value_limit = 1.0;
             }
-            self.stab_data.insert(timestamp_us, transform);
+            self.stab_data.put(timestamp_us, transform);
         }
     }
 
@@ -636,7 +647,7 @@ impl Stabilization {
     }
 
     pub fn get_undistortion_data(&self, timestamp_us: i64) -> Option<&FrameTransform> {
-        self.stab_data.get(&timestamp_us)
+        self.stab_data.peek(&timestamp_us)
     }
 
     pub fn list_devices(&self) -> Vec<String> {
@@ -828,7 +839,9 @@ impl Stabilization {
         }
 
         self.init_backends::<T>(timestamp_us, frame, buffers);
-        self.ensure_stab_data_at_timestamp::<T>(timestamp_us, frame, buffers, false);
+        if self.cache_frame_transform { // Without the cache, `process_pixels` computes the transform itself and never reads it from `stab_data`
+            self.ensure_stab_data_at_timestamp::<T>(timestamp_us, frame, buffers, false);
+        }
 
         if self.share_wgpu_instances {
             if wgpu::is_buffer_supported(buffers) && CACHED_WGPU.with(|x| !x.0.borrow().is_empty()) {
@@ -876,7 +889,7 @@ impl Stabilization {
             if !self.cache_frame_transform {
                 _tmp_transform.as_ref()
             } else {
-                self.stab_data.get(&timestamp_us)
+                self.stab_data.peek(&timestamp_us)
             }
         );
 

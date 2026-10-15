@@ -5,10 +5,13 @@ mod file_metadata;
 mod imu_transforms;
 mod sony;
 mod canon;
+mod motioncam;
 pub mod splines;
+pub mod optical_correction;
 pub use file_metadata::*;
+pub use optical_correction::{ OpticalCorrection, OpticalCorrectionSettings, TrackingMethod };
 pub use imu_transforms::*;
-pub use sony::interpolate_mesh;
+pub use sony::{ interpolate_mesh, MESH_REFINE_SKIP_PX, MESH_REFINE_THRESHOLD_PX };
 
 use nalgebra::*;
 use std::iter::zip;
@@ -70,7 +73,25 @@ pub struct GyroSource {
     offsets_linear: BTreeMap<i64, f64>, // <microseconds timestamp, offset in milliseconds> - linear fit
     offsets_adjusted: BTreeMap<i64, f64>, // <timestamp + offset, offset>
 
-    pub file_url: String
+    pub file_url: String,
+
+    /// Correction measured from the video, composed onto `quaternions` at the end of `integrate`
+    #[serde(default)]
+    pub optical_correction: Option<OpticalCorrection>,
+    /// Whether the last `integrate` applied it: an enabled one that doesn't match the quaternions is stale
+    #[serde(skip)]
+    pub optical_correction_applied: bool,
+    /// `optical_correction::checksum` of the quaternions the last `integrate` composed it onto, or would have
+    #[serde(skip)]
+    pub optical_uncorrected_checksum: u64,
+    /// The context the correction applies in: what `optical_motion::context_checksum` makes of the current sync, lens
+    /// and frame timing. Kept up to date by `StabilizationManager::refresh_optical_correction`
+    #[serde(skip)]
+    pub optical_context: u64,
+    /// The file's own motion data and sync points, set aside while the motion comes from the video instead, see
+    /// `set_ignore_file_motion`
+    #[serde(skip)]
+    ignored_motion: Option<Arc<(FileMotion, BTreeMap<i64, f64>)>>,
 }
 
 impl GyroSource {
@@ -86,6 +107,37 @@ impl GyroSource {
 
     pub fn has_motion(&self) -> bool {
         self.file_metadata.read().has_motion()
+    }
+
+    /// Sets the file's own motion data aside, and its sync points with it, so the motion comes from the video instead:
+    /// "Analyze image optically" then measures all of it, as for a file without any. For motion data too broken to
+    /// correct. Meanwhile everything reading motion data sees a file without any; the lens, the frame timing and the
+    /// rest of the metadata stay. False brings them back. Returns whether anything changed
+    pub fn set_ignore_file_motion(&mut self, ignore: bool) -> bool {
+        if ignore == self.ignored_motion.is_some() { return false; }
+        if ignore {
+            let motion = self.file_metadata.take_motion();
+            let offsets = std::mem::take(&mut self.offsets);
+            self.clear_offsets();
+            self.ignored_motion = Some(Arc::new((motion, offsets)));
+        } else if let Some(ignored) = self.ignored_motion.take() {
+            let (motion, offsets) = Arc::unwrap_or_clone(ignored);
+            self.file_metadata.restore_motion(motion);
+            self.set_offsets(offsets);
+        }
+        self.apply_transforms();
+        true
+    }
+    pub fn ignores_file_motion(&self) -> bool {
+        self.ignored_motion.is_some()
+    }
+    /// The sync points that belong to the file's motion data, also while it's set aside
+    pub fn file_offsets(&self) -> &BTreeMap<i64, f64> {
+        self.ignored_motion.as_ref().map(|x| &x.1).unwrap_or(&self.offsets)
+    }
+    /// The file's metadata with its motion data, when that's set aside (None otherwise: `file_metadata` has it)
+    pub fn file_metadata_with_ignored_motion(&self) -> Option<FileMetadata> {
+        self.ignored_motion.as_ref().map(|x| self.file_metadata.with_motion(&x.0))
     }
 
     pub fn set_use_gravity_vectors(&mut self, v: bool) {
@@ -122,7 +174,10 @@ impl GyroSource {
             blackbox_gyro_only: true,
             tag_blacklist: [
                 TagFilter::EntireGroup(GroupId::UnknownGroup(0xf000)),
-                TagFilter::EntireGroup(GroupId::UnknownGroup(0x0))
+                TagFilter::EntireGroup(GroupId::UnknownGroup(0x0)),
+                // Not used here, and they are most of a MotionCam clip's metadata
+                TagFilter::EntireGroup(GroupId::Custom("FrameMetadata".into())),
+                TagFilter::SpecificTag(GroupId::Lens, TagId::Shading),
             ].into(),
             ..Default::default()
         };
@@ -228,16 +283,29 @@ impl GyroSource {
                         if let Some(v) = map.get_t(TagId::IrisTStop) as Option<&f32> {
                             lens_info.iris_tstop = Some(*v);
                         }
+                        if let Some(v) = map.get_t(TagId::ZoomRingPosition) as Option<&f32> {
+                            lens_info.zoom_ring_position = Some(*v);
+                        }
+                        let (pfl_scale, pfl_valid) = match canon::recorded_frame_size(tag_map) {
+                            Some((aw, ah)) if aw > 0 && ah > 0 && size.0 > 0 && size.1 > 0 => {
+                                let aspect_matches = ((aw as f64 / ah as f64) / (size.0 as f64 / size.1 as f64) - 1.0).abs() < 0.02;
+                                (size.0 as f32 / aw as f32, aspect_matches)
+                            }
+                            _ => (1.0, true)
+                        };
+                        if !pfl_valid {
+                            lens_info.pixel_focal_length = None;
+                        }
                         if let Some(v) = map.get_t(TagId::PixelFocalLength) as Option<&(f32, f32)> {
-                            lens_info.pixel_focal_length = Some(*v);
+                            if pfl_valid { lens_info.pixel_focal_length = Some((v.0 * pfl_scale, v.1 * pfl_scale)); }
                         }
                         if let Some(v) = map.get_t(TagId::PixelFocalLength) as Option<&f32> {
-                            lens_info.pixel_focal_length = Some((*v, *v));
+                            if pfl_valid { lens_info.pixel_focal_length = Some((*v * pfl_scale, *v * pfl_scale)); }
                         }
                         if let Some(v) = map.get_t(TagId::PixelFocalLength) as Option<&Vec<f32>> {
                             match v.as_slice() {
-                                [fx]          => lens_info.pixel_focal_length = Some((*fx, *fx)),
-                                [fx, fy, ..]  => lens_info.pixel_focal_length = Some((*fx, *fy)),
+                                [fx]         if pfl_valid => lens_info.pixel_focal_length = Some((*fx * pfl_scale, *fx * pfl_scale)),
+                                [fx, fy, ..] if pfl_valid => lens_info.pixel_focal_length = Some((*fx * pfl_scale, *fy * pfl_scale)),
                                 _ => {}
                             }
                         }
@@ -386,6 +454,10 @@ impl GyroSource {
 
         let mut raw_imu = util::normalized_imu_interpolated(&input, Some("XYZ".into())).unwrap_or_default();
 
+        // Sony: the metadata packets carry the gyro timing (offset and rate per frame), use it instead of a uniform spacing
+        let sony_packet_timed = input.camera_type() == "Sony" && input.samples.as_ref().map(|s| sony::retime_imu_from_packets(&mut raw_imu, s)).unwrap_or(false);
+        if sony_packet_timed { log::debug!("Sony gyro samples re-timed from the metadata packets"); }
+
         if (input.camera_type() == "RED" || input.camera_type() == "RED RAW") && options.project_version > 0 && options.project_version < 4 { // Legacy gyro offset
             let mut first_timestamp = None;
             log::debug!("Legacy project, removing new RED gyro offset");
@@ -436,13 +508,16 @@ impl GyroSource {
             per_frame_time_offsets: Vec::new(),
             digital_zoom,
             camera_stab_data: Vec::new(),
-            mesh_correction:  Vec::new(),
+            mesh_correction:  Default::default(),
+            legacy_mesh_correction: Vec::new(),
+            lens_breathing:   Vec::new(),
+            focal_length_varies_cache: Default::default(),
         };
 
         let sample_rate = Self::get_sample_rate(&md);
         let mut original_sample_rate = sample_rate;
         let mut is_temp = sony::ISTemp::default();
-        let mut mesh_cache = BTreeMap::new();
+        let mut mesh_cache = BTreeMap::new(); // mesh key -> table index, so the frames with the same mesh share one
         let is_gyroflow_proto = input.parser_name() == "GyroflowProtobuf";
         if let Some(ref samples) = input.samples {
             for info in samples {
@@ -461,15 +536,16 @@ impl GyroSource {
                         if let Some(offset) = gyroflow_proto_time_offset(tag_map) {
                             md.per_frame_time_offsets.push(offset);
                         }
-                    } else if let Some((org_sample_rate, offset)) = sony::get_time_offset(&md, &input, tag_map, sample_rate) {
+                    } else if let Some((org_sample_rate, offset)) = sony::get_time_offset(&md, &input, tag_map, sample_rate, sony_packet_timed) {
                         original_sample_rate = org_sample_rate;
                         md.per_frame_time_offsets.push(offset);
                     }
                     sony::init_lens_profile(&mut md, &input, tag_map, size, info);
                     sony::stab_collect(&mut is_temp, tag_map, info, fps);
-                    if let Some(mesh) = sony::get_mesh_correction(tag_map, &mut mesh_cache) {
-                        md.mesh_correction.push(mesh);
-                    }
+                    // One entry per sample, the correction is looked up by frame index: empty where the frame has none
+                    // (`MeshCorrections::frame`); the whole thing goes when no frame has one
+                    let mesh_frame = sony::get_mesh_correction(tag_map, size, &mut md.mesh_correction, &mut mesh_cache).unwrap_or_default();
+                    md.mesh_correction.frames.push(mesh_frame);
 
                     if let Some(ois) = tag_map.get(&GroupId::LensOSS).and_then(|x| x.get_t(TagId::Data) as Option<&Vec<TimeVector3<i32>>>) {
                         if ois.len() == 1 && *ois.first().unwrap() == (TimeVector3 { t: -1, x: -1, y: -1, z: -1 }) {
@@ -503,6 +579,15 @@ impl GyroSource {
                         canon::init_lens_profile(&mut md, &input, tag_map, size, info);
                     }
                     // --------------------------------- Canon ---------------------------------
+
+                    // --------------------------------- MotionCam ---------------------------------
+                    if input.camera_type() == "MotionCam" {
+                        if let Some(offset) = motioncam::get_time_offset(&md, tag_map, info, fps) {
+                            md.per_frame_time_offsets.push(offset);
+                        }
+                        motioncam::init_lens_profile(&mut md, &input, tag_map, size, info);
+                    }
+                    // --------------------------------- MotionCam ---------------------------------
 
                     // --------------------------------- Insta360 ---------------------------------
                     // Timing
@@ -539,10 +624,22 @@ impl GyroSource {
                     // --------------------------------- Insta360 ---------------------------------
                 }
             }
-            if !is_temp.t.is_empty() {
+            if input.camera_type() == "Sony" {
+                md.lens_breathing = sony::breathing::compute(samples);
+            }
+            if md.mesh_correction.is_empty() {
+                md.mesh_correction.clear();
+            } else {
+                let tables = &md.mesh_correction.tables;
+                log::debug!("Mesh correction: {} tables over {} frames, {} refined against the camera's mesh", tables.len(), md.mesh_correction.frames.len(), tables.iter().filter(|t| !t.refinement.is_empty()).count());
+            }
+            if !is_temp.ibis.t.is_empty() || !is_temp.ois.t.is_empty() {
                 md.camera_stab_data = sony::stab_calc_splines(&md, &is_temp, sample_rate, fps, size).unwrap_or_default();
-                if let Some(frt) = md.frame_readout_time {
-                    md.frame_readout_time = Some(frt / original_sample_rate * sample_rate);
+                if !sony_packet_timed {
+                    // Uniform gyro timeline: rescale the metadata readout to the measured sample rate, like the per-frame offsets
+                    if let Some(frt) = md.frame_readout_time {
+                        md.frame_readout_time = Some(frt / original_sample_rate * sample_rate);
+                    }
                 }
             }
         }
@@ -564,21 +661,22 @@ impl GyroSource {
         self.imu_transforms.acc_rotation = None;
         self.imu_transforms.imu_lpf = 0.0;
         self.imu_transforms.imu_mf = 0;
-        self.imu_transforms.glitch_filter = false;
-        self.imu_transforms.glitch_strength = 0.0;
         self.imu_transforms.gyrogate_filter = false;
         self.imu_transforms.gyrogate_strength = 50.0;
         self.file_metadata = Default::default();
+        self.optical_correction = None;
+        self.ignored_motion = None;
         self.clear_offsets();
     }
 
-    pub fn load_from_telemetry(&mut self, telemetry: FileMetadata) {
+    pub fn load_from_telemetry(&mut self, mut telemetry: FileMetadata) {
         if self.duration_ms <= 0.0 {
             ::log::error!("Invalid duration_ms {}", self.duration_ms);
             return;
         }
 
         self.clear();
+        sony::upgrade_legacy_metadata(&mut telemetry);
 
         self.imu_transforms.imu_orientation = telemetry.imu_orientation.clone();
 
@@ -633,19 +731,12 @@ impl GyroSource {
                     file_metadata.quaternions.clone()
                 };
                 // Before the generic filters: it removes the raw sensor bursts and the
-                // fusion's pull-back of them, which the glitch filter and low-pass would smear.
+                // fusion's pull-back of them, which the low-pass would smear.
                 if self.imu_transforms.gyrogate_filter && self.quaternions.len() >= 8 {
                     let settings = crate::gyrogate::Settings::from_strength(self.imu_transforms.gyrogate_strength);
                     let removed = crate::gyrogate::memory::repair(&mut self.quaternions, &settings);
                     if removed > 0 {
                         log::info!("Gyrogate: removed {} false burst(s)", removed);
-                    }
-                }
-                if self.imu_transforms.glitch_filter && self.quaternions.len() >= 8 {
-                    let params = super::filtering::GlitchRepairParams::from_strength(self.imu_transforms.glitch_strength);
-                    let patched = super::filtering::GlitchRepair::repair_quats(&mut self.quaternions, &params);
-                    if patched > 0 {
-                        log::info!("Glitch filter: repaired {} sample(s)", patched);
                     }
                 }
                 if self.imu_transforms.imu_lpf > 0.0 && !self.quaternions.is_empty() && self.duration_ms > 0.0 {
@@ -668,6 +759,35 @@ impl GyroSource {
             6 => self.quaternions = MadgwickIntegrator       ::integrate(self.raw_imu(&file_metadata), self.duration_ms),
             _ => log::error!("Unknown integrator")
         }
+        drop(file_metadata);
+        self.apply_optical_correction();
+    }
+
+    /// Composes the correction measured from the video onto freshly integrated quaternions - when it was measured
+    /// against these very ones, in this context, see `OpticalCorrection`
+    fn apply_optical_correction(&mut self) {
+        self.optical_correction_applied = false;
+        if let Some(c) = &self.optical_correction {
+            let from_video = self.quaternions.len() < 2 && !c.video_base.is_empty();
+            if from_video {
+                // A file without motion data: what the analysis measured between the frames is all there is
+                self.quaternions = c.base_quats();
+            }
+            self.optical_uncorrected_checksum = optical_correction::checksum(&self.quaternions);
+            if self.optical_correction_applies() {
+                c.apply(&mut self.quaternions);
+                self.optical_correction_applied = true;
+            } else if c.enabled {
+                log::warn!("The optical correction was measured on other motion data (another integration method or filter), sync, lens or frame timing, not applying it");
+            }
+            if from_video {
+                optical_correction::hold_over_clip(&mut self.quaternions, self.duration_ms);
+            }
+        }
+    }
+    /// Whether `integrate` composes the correction onto the quaternions, as things stand
+    pub fn optical_correction_applies(&self) -> bool {
+        self.optical_correction.as_ref().is_some_and(|c| c.enabled && c.measured_on(self.optical_uncorrected_checksum, self.optical_context))
     }
 
     pub fn recompute_smoothness(&self, alg: &dyn SmoothingAlgorithm, horizon_lock: super::smoothing::horizon::HorizonLock, compute_params: &crate::ComputeParams) -> (TimeQuat, (f64, f64, f64)) {
@@ -688,7 +808,25 @@ impl GyroSource {
         if true {
             // Lock horizon, then smooth
             horizon_lock.lock(&mut smoothed_quaternions, &self.quaternions, &file_metadata.gravity_vectors, self.use_gravity_vectors, self.integration_method, compute_params);
-            smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
+            let locked_quaternions = smoothed_quaternions;
+            smoothed_quaternions = alg.smooth(&locked_quaternions, self.duration_ms, compute_params);
+
+            // "Only within trim range" replaces the motion outside of the trim ranges before smoothing, so it doesn't affect
+            // the smoothing inside of them. The result outside of the ranges has nothing to do with the real motion then,
+            // and the preview there looks like the shaky original, drifting. Those frames are not rendered, so use the
+            // smoothing of the whole video for them
+            if !compute_params.trim_ranges.is_empty() && alg.get_parameter("trim_range_only") > 0.5 {
+                let mut whole_video = compute_params.clone();
+                whole_video.trim_ranges.clear();
+                let whole_smoothed = alg.smooth(&locked_quaternions, self.duration_ms, &whole_video);
+                let duration_us = compute_params.scaled_duration_ms * 1000.0;
+                let ranges = compute_params.trim_ranges.iter().map(|x| ((x.0 * duration_us).round() as i64, (x.1 * duration_us).round() as i64)).collect::<Vec<_>>();
+                for (ts, q) in smoothed_quaternions.iter_mut() {
+                    if !ranges.iter().any(|r| *ts >= r.0 && *ts <= r.1) {
+                        if let Some(whole) = whole_smoothed.get(ts) { *q = *whole; }
+                    }
+                }
+            }
         } else {
             // Smooth, then lock horizon
             smoothed_quaternions = alg.smooth(&smoothed_quaternions, self.duration_ms, compute_params);
@@ -844,7 +982,7 @@ impl GyroSource {
             self.raw_imu = file_metadata.raw_imu.clone();
             for x in self.raw_imu.iter_mut() {
                 if let Some(g) = x.gyro.as_mut() {
-                    self.imu_transforms.transform(g, false);
+                    self.imu_transforms.transform_gyro(g);
                 }
                 if let Some(a) = x.accl.as_mut() {
                     self.imu_transforms.transform(a, true);
@@ -941,8 +1079,6 @@ impl GyroSource {
         hasher.write_u64(self.duration_ms.to_bits());
         hasher.write_u64(self.imu_transforms.imu_lpf.to_bits());
         hasher.write_i32(self.imu_transforms.imu_mf);
-        hasher.write_u8(if self.imu_transforms.glitch_filter { 1 } else { 0 });
-        hasher.write_u64(self.imu_transforms.glitch_strength.to_bits());
         hasher.write_u8(if self.imu_transforms.gyrogate_filter { 1 } else { 0 });
         hasher.write_u64(self.imu_transforms.gyrogate_strength.to_bits());
         hasher.write_usize(self.raw_imu.len());
@@ -954,6 +1090,10 @@ impl GyroSource {
         hasher.write_usize(file_metadata.lens_params.len());
         hasher.write_u32(if self.use_gravity_vectors { 1 } else { 0 });
         hasher.write_usize(self.integration_method);
+        if let Some(c) = &self.optical_correction { c.hash_into(&mut hasher); }
+        // Switched on or off by the context alone (`refresh_optical_correction`), the correction is the same one, and
+        // where it isn't measured (the ends of the clip, which the rest of this looks at) the quaternions are too
+        hasher.write_u8(self.optical_correction_applied as u8);
         for (ts, v) in &self.offsets {
             hasher.write_i64(*ts);
             hasher.write_u64(v.to_bits());

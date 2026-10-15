@@ -37,7 +37,7 @@ MenuItem {
 
     FileDialog {
         id: fileDialog;
-        property var extensions: [ "csv", "txt", "bbl", "bfl", "mp4", "mov", "mxf", "insv", "gcsv", "360", "log", "bin", "braw", "r3d", "nev", "gpmf", "crm", "zraw", "jsonl" ];
+        property var extensions: [ "csv", "txt", "bbl", "bfl", "mp4", "mov", "mxf", "insv", "gcsv", "360", "log", "bin", "braw", "r3d", "nev", "gpmf", "crm", "zraw", "jsonl", "mcraw" ];
 
         title: qsTr("Choose a motion data file")
         nameFilters: Qt.platform.os == "android"? undefined : [qsTr("Motion data files") + " (*." + extensions.concat(extensions.map(x => x.toUpperCase())).join(" *.") + ")"];
@@ -78,11 +78,11 @@ MenuItem {
                 lpf.value = +gyro.lpf;
                 lpfcb.checked = lpf.value > 0;
             }
-            if (typeof gyro.glitch_strength === "number" && +gyro.glitch_strength > 0) {
-                glitchStrength.value = +gyro.glitch_strength;
+            if (typeof gyro.optical_correction_strength === "number") {
+                opticalStrength.value = Math.round(gyro.optical_correction_strength * 100);
             }
-            if (gyro.hasOwnProperty("glitch_filter")) {
-                glitchcb.checked = !!gyro.glitch_filter;
+            if (typeof gyro.optical_correction_per_frame === "boolean") {
+                opticalPerFrame.currentIndex = gyro.optical_correction_per_frame? 1 : 0;
             }
             if (typeof gyro.gyrogate_strength === "number") {
                 gyrogateStrength.value = +gyro.gyrogate_strength;
@@ -94,6 +94,11 @@ MenuItem {
                 gyrogatecb.checked = false;
             }
             controller.set_gyrogate_filter(gyrogatecb.checked, gyrogateStrength.value);
+            if (typeof gyro.optical_tracking === "string") {
+                opticalTracking.currentIndex = gyro.optical_tracking === "dis"? 1 : 0;
+            }
+            // The checkbox from the core, which has the project's correction and whether it's on (`optical_correction_enabled`)
+            Qt.callLater(opticalcb.updateInfo);
             if (typeof gyro.sample_index === "number") {
                 currentLog.currentIndex = gyro.sample_index + 1;
             }
@@ -119,6 +124,12 @@ MenuItem {
     Connections {
         target: controller;
         function onTelemetry_loaded(is_main_video: bool, filename: string, camera: string, additional_data: var): void {
+            if (additional_data.cancelled) {
+                // It didn't load anything: nothing below applies (eg. it would pick an integration method for a video
+                // without quaternions), and the project waiting for the file has to load it again
+                root.filename = "";
+                return;
+            }
             root.filename = filename || "";
             root.detectedFormat = camera || "";
             info.updateEntry("File name", filename || "---");
@@ -146,7 +157,6 @@ MenuItem {
 
             controller.set_imu_lpf(lpfcb.checked? lpf.value : 0);
             controller.set_imu_median_filter(mfcb.checked? mf.value : 0);
-            controller.set_glitch_filter(glitchcb.checked, glitchStrength.value);
             // On by default where the clip shows the defect; a project loaded afterwards
             // restores its own choice through loadGyroflow().
             root.gyrogate = additional_data.gyrogate || null;
@@ -158,6 +168,10 @@ MenuItem {
                 root.opened = true;
                 gyrogateRevealTimer.start();
             }
+            controller.set_optical_correction_strength(opticalStrength.value / 100);
+            controller.set_optical_correction_per_frame(opticalPerFrame.currentIndex === 1);
+            controller.set_optical_tracking(opticalTracking.currentIndex === 1? "dis" : "klt");
+            Qt.callLater(opticalcb.updateInfo);
             controller.set_imu_rotation(rot.checked? p.value : 0, rot.checked? r.value : 0, rot.checked? y.value : 0);
             controller.set_acc_rotation(arot.checked? ap.value : 0, arot.checked? ar.value : 0, arot.checked? ay.value : 0);
             Qt.callLater(controller.recompute_gyro);
@@ -324,30 +338,149 @@ MenuItem {
         }
     }
     CheckBoxWithContent {
-        id: glitchcb;
-        text: qsTr("Glitch filtering");
-        tooltip: qsTr("Detect and repair short bursts of corrupt gyro data");
+        id: opticalcb;
+        text: qsTr("Optical correction");
+        tooltip: qsTr("Measure the camera rotation from the video and correct the motion data where they disagree, e.g. gyro errors caused by vibration. Only the trim range is analyzed.");
+        property var info: ({ available: false });
+        // Always opticalcb.info: this file has an element with the id `info` too, and ids come before properties
+        function updateInfo(): void {
+            try { opticalcb.info = JSON.parse(controller.optical_correction_info()); } catch (e) { opticalcb.info = { available: false }; }
+            const info = opticalcb.info;
+            // The core has the say: with a correction (an analysis, also the one Auto sync runs on a file without motion
+            // data, a project) the checkbox shows whether it's on, without one it stays as it was left, and ignoring
+            // the file's motion data keeps this section open. Set once: its handler, for a `false` on the way, would
+            // bring the ignored motion data back
+            const checked = !!info.ignore_file_motion || (info.available? !!info.enabled : opticalcb.checked);
+            if (opticalcb.checked !== checked) opticalcb.checked = checked;
+            if (ignoreFileMotion.checked !== !!info.ignore_file_motion) ignoreFileMotion.checked = !!info.ignore_file_motion;
+        }
         onCheckedChanged: {
-            controller.set_glitch_filter(checked, glitchStrength.value);
-            Qt.callLater(controller.recompute_gyro);
+            controller.set_optical_correction_enabled(checked);
+            // Off means the motion data as it is
+            if (!checked) controller.set_ignore_file_motion(false);
+        }
+
+        Row {
+            anchors.horizontalCenter: parent.horizontalCenter;
+            spacing: 5 * dpiScale;
+            Button {
+                text: qsTr("Analyze");
+                iconName: "spinner";
+                enabled: !controller.sync_in_progress && window.videoArea.vid.loaded;
+                onClicked: controller.analyze_optically();
+            }
+            LinkButton {
+                anchors.verticalCenter: parent.verticalCenter;
+                text: qsTr("Clear");
+                leftPadding: 6 * dpiScale;
+                rightPadding: 6 * dpiScale;
+                visible: !!opticalcb.info.available;
+                enabled: !controller.sync_in_progress;
+                onClicked: controller.clear_optical_correction();
+            }
+        }
+        BasicText {
+            width: parent.width;
+            wrapMode: Text.WordWrap;
+            horizontalAlignment: Text.AlignHCenter;
+            visible: text.length > 0;
+            text: {
+                const i = opticalcb.info;
+                // Stale: measured on other motion data, sync, lens or frame timing, and not applied
+                return !i.available? "" :
+                       i.stale || (i.ignore_file_motion && !i.from_video)? qsTr("Out of date and not applied, analyze again.") :
+                       i.outdated || i.tracking_changed? qsTr("Analyze again to apply the new settings.") :
+                       i.from_video? "" :
+                       qsTr("Measured in %1 of %2 frames, correction %3°").arg(i.measured_frames).arg(i.frames).arg((+i.rms_deg).toFixed(3));
+            }
+        }
+        CheckBox {
+            id: ignoreFileMotion;
+            text: qsTr("Ignore motion data from the file");
+            tooltip: qsTr("Measure all of the motion from the video instead of correcting the motion data, when it's too broken to correct.");
+            // Nothing to ignore in a file without motion data
+            visible: !!opticalcb.info.has_motion || !!opticalcb.info.ignore_file_motion;
+            onCheckedChanged: controller.set_ignore_file_motion(checked);
+        }
+
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Tracking");
+            ComboBox {
+                id: opticalTracking;
+                model: [QT_TRANSLATE_NOOP("Popup", "KLT (corners)"), QT_TRANSLATE_NOOP("Popup", "DIS (dense flow)")];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                tooltip: qsTr("KLT is the most accurate where the image has detail. DIS also follows weak detail like clouds or water, but is slower and loses fast motion more easily.");
+                onCurrentIndexChanged: controller.set_optical_tracking(currentIndex === 1? "dis" : "klt");
+            }
+        }
+        Label {
+            position: Label.LeftPosition;
+            text: qsTr("Correction");
+            ComboBox {
+                id: opticalPerFrame;
+                model: [QT_TRANSLATE_NOOP("Popup", "Per row"), QT_TRANSLATE_NOOP("Popup", "Per frame")];
+                font.pixelSize: 12 * dpiScale;
+                width: parent.width;
+                tooltip: qsTr("Per row also removes vibration within a frame (jello). Per frame suits global shutter cameras, frames with large areas without detail, or an unknown rolling shutter time.");
+                onCurrentIndexChanged: controller.set_optical_correction_per_frame(currentIndex === 1);
+            }
         }
         Label {
             text: qsTr("Strength");
             width: parent.width;
-            tooltip: qsTr("Higher values detect glitches more aggressively (catching weaker and longer bursts with more passes), but may affect real fast motion. Lower values only repair the obvious, large glitches. 50% is the default.");
+            // Without motion data to correct (none in the file, or ignored), the motion and its correction come from
+            // the same tracks: the correction only refines within the frames, the strength changes next to nothing
+            visible: !!opticalcb.info.has_motion;
+            tooltip: qsTr("Low values only correct small, fast errors like vibration. High values also correct large and long errors like gyro glitches, but follow moving objects in the image more.");
             SliderWithField {
-                id: glitchStrength;
+                id: opticalStrength;
                 defaultValue: 50;
                 to: 100;
                 value: 50;
                 unit: "%";
                 precision: 0;
                 width: parent.width;
-                onValueChanged: {
-                    controller.set_glitch_filter(glitchcb.checked, value);
-                    Qt.callLater(controller.recompute_gyro);
+                // Each change refits the correction (up to half a second on a long clip): not on every step of a drag
+                onValueChanged: opticalStrengthTimer.restart();
+                Timer {
+                    id: opticalStrengthTimer;
+                    interval: 150;
+                    onTriggered: controller.set_optical_correction_strength(opticalStrength.value / 100);
                 }
             }
+        }
+        CheckBox {
+            id: editTrackedPoints;
+            text: qsTr("Show/edit tracked points");
+            tooltip: qsTr("Green: used, yellow: counted less, red: rejected. Click or drag to select tracks, Shift adds, Ctrl+drag selects that part of the camera frame through the whole clip (e.g. propellers). Delete removes them, Ctrl+Z brings them back.");
+            // Only after an analysis in this session: a project keeps the correction, not the tracks
+            visible: !!opticalcb.info.tracked_points;
+            checked: false;
+            // Stays checked through files without tracks, for the next analysis
+            readonly property bool shown: checked && opticalcb.checked && !!opticalcb.info.tracked_points;
+            onShownChanged: window.videoArea.opticalPointEditor.active = shown;
+        }
+        Row {
+            spacing: 5 * dpiScale;
+            // Also without the tracks: a project remembers what was taken out, for the next analysis
+            visible: +opticalcb.info.removed_tracks > 0;
+            BasicText {
+                anchors.verticalCenter: parent.verticalCenter;
+                text: opticalcb.info.removed_tracks_pending? qsTr("Updating...") : qsTr("%n track(s) removed", "", +opticalcb.info.removed_tracks);
+            }
+            LinkButton {
+                text: qsTr("Restore all");
+                leftPadding: 6 * dpiScale;
+                rightPadding: 6 * dpiScale;
+                onClicked: controller.restore_optical_tracks();
+            }
+        }
+        Connections {
+            target: controller;
+            function onOptical_correction_changed(): void { opticalcb.updateInfo(); }
+            function onChart_data_changed(): void { Qt.callLater(opticalcb.updateInfo); }
         }
     }
     Timer {
@@ -841,17 +974,19 @@ MenuItem {
                     ctx.lineWidth = 1 * dpiScale;
                     ctx.strokeStyle = maincolor;
                     const o = mesh[0];
-                    const stblz_grid = mesh_size[1] / 8;
+                    const stblz_grid = mesh[o + 2] > 0 ? mesh[o + 2] : mesh_size[1] / 8; // band height comes with the table, as in the kernels
 
                     let points = [];
                     for (let i = 0; i < 8; ++i) {
-                        // corners of the rectangle
-                        points.push([0, i * stblz_grid]);
-                        points.push([mesh_size[0], i * stblz_grid]);
-                        points.push([mesh_size[0], (i + 1) * stblz_grid]);
-                        points.push([0, (i + 1) * stblz_grid]);
+                        // corners of the rectangle; the last band carries on to the bottom of the sensor, as the kernels apply it
+                        const top = i * stblz_grid;
+                        const bottom = i == 7 ? Math.max((i + 1) * stblz_grid, mesh_size[1]) : (i + 1) * stblz_grid;
+                        points.push([0, top]);
+                        points.push([mesh_size[0], top]);
+                        points.push([mesh_size[0], bottom]);
+                        points.push([0, bottom]);
 
-                        points.push([0, i * stblz_grid]);
+                        points.push([0, top]);
                     }
 
                     for (let i = 0; i < points.length; ++i) {

@@ -13,8 +13,6 @@ pub struct IMUTransforms {
     pub acc_rotation: Option<Rotation3<f64>>,
     pub imu_lpf: f64,
     pub imu_mf: i32,
-    pub glitch_filter: bool,
-    pub glitch_strength: f64,
     /// DJI O4 "Gyrogate" repair of the attitude quaternions, see `crate::gyrogate`.
     #[serde(default)]
     pub gyrogate_filter: bool,
@@ -23,12 +21,16 @@ pub struct IMUTransforms {
     pub gyro_bias: Option<[f64; 3]>,
 }
 impl IMUTransforms {
-    pub fn transform(&self, v: &mut [f64; 3], is_acc: bool) {
+    /// Gyro samples get the bias first: it's in the frame of the samples, before the orientation
+    pub fn transform_gyro(&self, v: &mut [f64; 3]) {
         if let Some(bias) = self.gyro_bias {
             v[0] += bias[0];
             v[1] += bias[1];
             v[2] += bias[2];
         }
+        self.transform(v, false);
+    }
+    pub fn transform(&self, v: &mut [f64; 3], is_acc: bool) {
         if let Some(ref orientation) = self.imu_orientation {
             if orientation != "XYZ" {
                 *v = Self::orient(v, orientation.as_bytes());
@@ -48,7 +50,6 @@ impl IMUTransforms {
             || self.gyro_bias.is_some_and(|x| x[0].abs() > 0.0 || x[1].abs() > 0.0 || x[2].abs() > 0.0)
             || self.imu_lpf > 0.0
             || self.imu_mf > 0
-            || self.glitch_filter
     }
 
     pub fn set_imu_rotation(&mut self, pitch_deg: f64, roll_deg: f64, yaw_deg: f64) {

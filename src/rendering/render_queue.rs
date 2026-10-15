@@ -54,7 +54,9 @@ struct Job {
     additional_data: String,
     cancel_flag: Arc<AtomicBool>,
     project_data: Option<String>,
-    stab: Arc<StabilizationManager>
+    stab: Arc<StabilizationManager>,
+    /// Settings were applied to the job, but the motion data wasn't processed with them yet. It's done when the job starts rendering
+    gyro_outdated: Arc<AtomicBool>
 }
 
 #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -415,8 +417,10 @@ impl RenderQueue {
                     }
                     let stab = self.stabilizer.get_cloned();
 
-                    // If it's added from main UI, never do the additional autosync
-                    if let Some(ref mut obj) = stab.lens.write().sync_settings { obj.as_object_mut().and_then(|x| x.remove("do_autosync")); }
+                    // If it's added from main UI, never do the additional autosync, nor the optical analysis (it's done there)
+                    if let Some(ref mut obj) = stab.lens.write().sync_settings {
+                        if let Some(x) = obj.as_object_mut() { x.remove("do_autosync"); x.remove("do_optical_correction"); }
+                    }
 
                     self.add_internal(job_id, Arc::new(stab), render_options, additional_data, thumbnail_url);
                 }
@@ -488,7 +492,8 @@ impl RenderQueue {
             additional_data,
             cancel_flag: Default::default(),
             project_data,
-            stab: stab.clone()
+            stab: stab.clone(),
+            gyro_outdated: Default::default()
         });
         self.update_queue_indices();
 
@@ -961,8 +966,24 @@ impl RenderQueue {
                 }
             }
 
+            let processing2 = processing.clone();
+            let gyro_outdated = job.gyro_outdated.clone();
             core::run_threaded(move || {
+                if gyro_outdated.swap(false, SeqCst) {
+                    stab.recompute_gyro();
+                }
+                // Before the sync: motion data set aside has nothing to sync
+                let optical = Self::optical_correction_requested(&stab);
                 Self::do_autosync(stab.clone(), processing, &input_file, err2, proc_height);
+                if optical {
+                    if let Err(e) = Self::do_optical_correction(&stab, processing2, cancel_flag.clone(), pause_flag.clone()) {
+                        return if cancel_flag.load(SeqCst) {
+                            err(("Optical analysis cancelled%1".to_string(), String::new()))
+                        } else {
+                            err(("An error occurred: %1".to_string(), e))
+                        };
+                    }
+                }
                 stab.recompute_blocking();
 
                 if let Some((opt, path, fields)) = export_metadata {
@@ -989,7 +1010,7 @@ impl RenderQueue {
                         Ok(())
                     };
                     if let Err(e) = result() {
-                        err(("An error occured: %1".to_string(), e.to_string()));
+                        err(("An error occurred: %1".to_string(), e.to_string()));
                     } else {
                         progress((1.0, 1, 1, true, false));
                     }
@@ -1055,7 +1076,7 @@ impl RenderQueue {
                         let mut frame = 0;
                         let r3d_progress = |(percent, error_str, out_url): (f64, String, String)| {
                             if !error_str.is_empty() {
-                                err(("An error occured: %1".to_string(), error_str));
+                                err(("An error occurred: %1".to_string(), error_str));
                             } else {
                                 progress((percent * 0.98, frame, total_frame_count + 1, false, true));
                                 input_file.url = out_url;
@@ -1114,7 +1135,7 @@ impl RenderQueue {
                                     continue;
                                 }
                             }
-                            err(("An error occured: %1".to_string(), e.to_string()));
+                            err(("An error occurred: %1".to_string(), e.to_string()));
                             break 'ranges;
                         } else {
                             // Render ok
@@ -1288,7 +1309,7 @@ impl RenderQueue {
                                     if let Ok(data) = filesystem::read_to_string(&url) {
                                         apply_preset((data, 0));
                                     } else {
-                                        err(("An error occured: %1".to_string(), format!("Unable to read the preset file {}", url)));
+                                        err(("An error occurred: %1".to_string(), format!("Unable to read the preset file {}", url)));
                                     }
                                     // The preset is applied to the already queued jobs, this job itself never enters the queue
                                     processing_failed(());
@@ -1319,7 +1340,7 @@ impl RenderQueue {
                                         };
 
                                         if let Err(e) = fetch_thumb(out, ratio) {
-                                            err(("An error occured: %1".to_string(), e.to_string()));
+                                            err(("An error occurred: %1".to_string(), e.to_string()));
                                         }
                                     }
 
@@ -1333,7 +1354,7 @@ impl RenderQueue {
                                     processing_done(());
                                 },
                                 Err(e) => {
-                                    err(("An error occured: %1".to_string(), format!("Error loading {}: {:?}", url, e)));
+                                    err(("An error occurred: %1".to_string(), format!("Error loading {}: {:?}", url, e)));
                                     processing_failed(());
                                 }
                             }
@@ -1393,7 +1414,7 @@ impl RenderQueue {
                                                 }
                                             }
                                             Err(e) => {
-                                                err(("An error occured: %1".to_string(), e.to_string()));
+                                                err(("An error occurred: %1".to_string(), e.to_string()));
                                                 processing_failed(());
                                                 return;
                                             }
@@ -1430,16 +1451,16 @@ impl RenderQueue {
                                 }
 
                                 if let Err(e) = fetch_thumb(&url, ratio) {
-                                    err(("An error occured: %1".to_string(), e.to_string()));
+                                    err(("An error occurred: %1".to_string(), e.to_string()));
                                 }
 
                                 processing_done(());
                             } else {
-                                err(("An error occured: %1".to_string(), format!("Unable to determine the video duration ({} ms) or frame rate ({} fps).", info.duration_ms, info.fps)));
+                                err(("An error occurred: %1".to_string(), format!("Unable to determine the video duration ({} ms) or frame rate ({} fps).", info.duration_ms, info.fps)));
                                 processing_failed(());
                             }
                         } else {
-                            err(("An error occured: %1".to_string(), "Unable to read the video file.".to_string()));
+                            err(("An error occurred: %1".to_string(), "Unable to read the video file.".to_string()));
                             processing_failed(());
                         }
                     });
@@ -1469,14 +1490,16 @@ impl RenderQueue {
         let fps = stab.params.read().fps;
 
         let sync_settings = stab.lens.read().sync_settings.clone().unwrap_or_default();
-        if !has_sync_points && !has_accurate_timestamps && sync_settings.get("do_autosync").and_then(|v| v.as_bool()).unwrap_or_default() {
+        // Without motion data there's nothing to sync: the optical analysis measures it instead, as Auto sync does in the
+        // app, see `optical_correction_requested`
+        let has_motion = stab.gyro.read().has_motion();
+        if has_motion && !has_sync_points && !has_accurate_timestamps && sync_settings.get("do_autosync").and_then(|v| v.as_bool()).unwrap_or_default() {
             // ----------------------------------------------------------------------------
             // --------------------------------- Autosync ---------------------------------
             processing_cb(0.01);
-            use fpvflow_core::synchronization::AutosyncProcess;
+            use fpvflow_core::synchronization::{ AutosyncProcess, AutosyncResult };
             use fpvflow_core::synchronization;
             use crate::rendering::VideoProcessor;
-            use itertools::Either;
 
             if let Ok(mut sync_params) = serde_json::from_value(sync_settings) as serde_json::Result<synchronization::SyncParams> {
                 if sync_params.max_sync_points > 0 {
@@ -1514,7 +1537,7 @@ impl RenderQueue {
                         });
                         let stab2 = stab.clone();
                         sync.on_finished(move |arg| {
-                            if let Either::Left(offsets) = arg {
+                            if let AutosyncResult::Offsets(offsets) = arg {
                                 let mut gyro = stab2.gyro.write();
                                 gyro.prevent_recompute = true;
                                 for x in offsets {
@@ -1581,7 +1604,7 @@ impl RenderQueue {
                                                 sync2.feed_frame(timestamp_us, frame_no, width, height, stride, pixels);
                                             },
                                             Err(e) => {
-                                                err2(("An error occured: %1".to_string(), e.to_string()))
+                                                err2(("An error occurred: %1".to_string(), e.to_string()))
                                             }
                                         }
                                         frame_no += 1;
@@ -1590,17 +1613,17 @@ impl RenderQueue {
                                     Ok(())
                                 });
                                 if let Err(e) = proc.start_decoder_only(sync.get_ranges(), cancel_flag) {
-                                    err(("An error occured: %1".to_string(), e.to_string()));
+                                    err(("An error occurred: %1".to_string(), e.to_string()));
                                 }
 
                                 sync.finished_feeding_frames();
                             }
                             Err(error) => {
-                                err(("An error occured: %1".to_string(), error.to_string()));
+                                err(("An error occurred: %1".to_string(), error.to_string()));
                             }
                         };
                     } else {
-                        err(("An error occured: %1".to_string(), "Invalid parameters".to_string()));
+                        err(("An error occurred: %1".to_string(), "Invalid parameters".to_string()));
                     }
 
                     stab.recompute_blocking();
@@ -1609,6 +1632,57 @@ impl RenderQueue {
             processing_cb(1.0);
             // --------------------------------- Autosync ---------------------------------
             // ----------------------------------------------------------------------------
+        }
+    }
+
+    /// Whether the job's synchronization settings ask for "Analyze image optically" (`do_optical_correction`, from the
+    /// CLI's --optical-correction or a preset), with a file without motion data asking for it with autosync too. Applies
+    /// `ignore_file_motion`, `optical_correction_strength`, `optical_correction_per_frame` and `optical_tracking` along with it
+    fn optical_correction_requested(stab: &StabilizationManager) -> bool {
+        let sync_settings = stab.lens.read().sync_settings.clone().unwrap_or_default();
+        let flag = |key: &str| sync_settings.get(key).and_then(|v| v.as_bool()).unwrap_or_default();
+        let requested = flag("do_optical_correction") || flag("ignore_file_motion");
+        if !requested && !(flag("do_autosync") && !stab.gyro.read().has_motion()) { return false; }
+        if let Some(strength) = sync_settings.get("optical_correction_strength").and_then(|v| v.as_f64()) {
+            stab.set_optical_correction_strength(strength);
+        }
+        if let Some(per_frame) = sync_settings.get("optical_correction_per_frame").and_then(|v| v.as_bool()) {
+            stab.set_optical_correction_per_frame(per_frame);
+        }
+        if let Some(method) = sync_settings.get("optical_tracking").and_then(|v| v.as_str()) {
+            if !stab.set_optical_tracking(method) { ::log::warn!("Unknown optical tracking method: {method}"); }
+        }
+        if flag("ignore_file_motion") {
+            stab.set_ignore_file_motion(true);
+        }
+        true
+    }
+
+    /// "Analyze image optically" before the render, see `optical_correction_requested`, with the job's cancel and pause.
+    /// Where it only corrects the file's motion data, a render without it is still one with that data as it is, so a
+    /// failed analysis only goes to the log. Where it's all the motion there is (a file without any, or with its own
+    /// ignored) the render would come out unstabilized: that fails the job instead
+    fn do_optical_correction<F: Fn(f64) + Send + Sync + Clone + 'static>(stab: &StabilizationManager, processing_cb: F, cancel_flag: Arc<AtomicBool>, pause_flag: Arc<AtomicBool>) -> Result<(), String> {
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
+        let _prevent_system_sleep = keep_awake::inhibit_system("Gyroflow", "Analyzing the video");
+        processing_cb(0.01);
+        let cb = processing_cb.clone();
+        let result = rendering::analyze_optically(stab, cancel_flag.clone(), Some(pause_flag), move |percent, _, _| cb(percent));
+        // Done either way: the queue only starts jobs whose processing isn't halfway
+        processing_cb(1.0);
+        match result {
+            Ok(()) => {
+                let info = stab.optical_correction_info();
+                ::log::info!("Optical correction: measured in {} of {} frames, correction {:.3} deg", info["measured_frames"], info["frames"], info["rms_deg"].as_f64().unwrap_or_default());
+                // The job renders with the correction: the tracks it was measured from are for editing, in the app
+                stab.release_optical_measurements();
+                Ok(())
+            },
+            Err(e) if cancel_flag.load(SeqCst) || !stab.gyro.read().has_motion() => Err(format!("Optical analysis failed: {e}")),
+            Err(e) => {
+                ::log::error!("Optical analysis failed, rendering with the motion data as it is: {e}");
+                Ok(())
+            },
         }
     }
 
@@ -1665,10 +1739,16 @@ impl RenderQueue {
                         }
                     }
 
+                    // Only store the settings here. Processing the motion data and computing the smoothing and zooming
+                    // happens when the job starts rendering, so applying settings to a long queue doesn't stall the UI
                     let mut is_preset = false;
-                    if let Err(e) = job.stab.import_gyroflow_data(&data_vec, true, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
+                    if let Err(e) = job.stab.import_gyroflow_data(&data_vec, false, None, |_|(), Arc::new(AtomicBool::new(false)), &mut is_preset, false) {
                         ::log::error!("Failed to update queue stab data: {:?}", e);
                     }
+                    job.gyro_outdated.store(true, SeqCst);
+                    // The render options are the source of the output size, the stabilizer needs it for the FOV and zooming
+                    job.stab.set_output_size(job.render_options.output_width, job.render_options.output_height);
+                    job.stab.init_size();
 
                     Self::update_sync_settings(&job.stab, &sync_options);
                     job.project_data = Self::get_gyroflow_data_internal(&job.stab, &job.additional_data, &job.render_options);
