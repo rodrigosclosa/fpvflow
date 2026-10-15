@@ -141,7 +141,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: true
-          name: FPVFlow ${{ github.ref_name }}
+          # Only the tag: 1.0.0 and 1.0.1 compare the release title with their own version,
+          # so a title like "FPVFlow v1.0.4" would hide every update from them.
+          name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
             artifacts/FPVFlow-*.zip
