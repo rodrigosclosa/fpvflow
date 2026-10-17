@@ -22,6 +22,10 @@ concurrency:
 jobs:
   build:
     uses: ./.github/workflows/build.yml
+    # build.yml's release job declares contents: write; it is skipped here, but
+    # the caller must still grant it or the workflow is rejected.
+    permissions:
+      contents: write
     with:
       ref: ${{ inputs.ref }}
 
