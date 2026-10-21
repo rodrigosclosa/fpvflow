@@ -100,8 +100,10 @@ jobs:
       - name: Package (Windows)
         if: ${{ matrix.type == 'windows' }}
         run: |
+          # `just deploy` already zips win64\* into FPVFlow-windows64.zip. Adding win64/*
+          # to it again here stored every file a second time under win64/.
           cd ${{ github.workspace }}/_deployment/_binaries
-          7z a FPVFlow-windows64.zip win64/*
+          7z l FPVFlow-windows64.zip | Select-Object -Last 1
 
       - name: Package (macOS)
         if: ${{ matrix.type == 'macos' }}
