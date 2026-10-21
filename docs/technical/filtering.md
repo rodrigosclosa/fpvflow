@@ -129,9 +129,11 @@ dedicated repair, **Remove DJI Gyrogate false rotations**, in the **Motion data*
 3. It adds back the slow pull-back that the camera applied to each removed burst, so the
    recovery drift disappears too.
 4. It applies a gentle low pass to the result, stronger in the stretches where a lot was removed.
+5. Where one axis carries a dense tremor of small single-axis spikes (many per second, below the
+   burst threshold), it low-passes that axis at 8 Hz, fading in and out over about half a second.
 
 The repair runs before glitch filtering and the low pass filter, so they never see the raw
-bursts. A clip in which no false rotation is found is left completely untouched.
+bursts. A clip with neither false rotations nor tremor is left completely untouched.
 
 **Sensitivity** sets how small a jump can be and still count as false:
 

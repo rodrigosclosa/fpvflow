@@ -34,6 +34,11 @@ trusts the motion data and faithfully "corrects" them, so the stabilized video j
 false rotation and then sways while the pull-back plays out. The FPV community calls this
 *DJI Gyrogate*.
 
+The same gyro has a second, quieter symptom: a dense **single-axis tremor**, usually on roll.
+Instead of a few large jumps, one axis carries many small spikes per second (around 20 to 50 °/s,
+a few tenths of a degree each) while the other two stay calm. Each spike is too small to count as
+a false rotation, but together they make the stabilized picture shiver.
+
 ## Is my air unit affected
 
 | Unit | Gyro | Affected |
@@ -80,6 +85,7 @@ The second line tells you what the clip contains:
 | Message | Meaning |
 |:--------|:--------|
 | N false rotation(s) found in this clip, X° in total, the largest Y°. | The clip has the defect. The repair is turned on. |
+| Dense single-axis tremor in X s of the clip. | The clip has the tremor. It can follow the false rotations line. The repair is turned on. |
 | No false rotations found in this clip. | Nothing to repair. |
 | No 1 kHz attitude data in this clip. Record with RockSteady and HorizonSteady off to be able to repair it. | The clip lacks the data the repair needs. See [Requirements](#requirements). |
 | N short single-axis jolt(s) found. With the original MP66 gyro these are usually real knocks, ... | Older O4 Pro: the repair stays off. See [Limits](#limits). |
@@ -97,7 +103,9 @@ The repair lives in the **Motion data** panel, under the detection message.
 4. Export as usual. The setting is saved with the project and with the render queue job.
 
 For each false rotation, the repair removes the burst, compensates the camera's slow pull-back of
-it, and smooths the result. Clips without false rotations are left untouched. The repair runs on
+it, and smooths the result. Where the single-axis tremor piles up, it smooths that axis only
+(low pass at 8 Hz), fading in and out over about half a second; the other axes and the calm parts
+of the clip are not touched. Clips with neither are left untouched. The repair runs on
 the motion data before the other motion data filters, such as **Glitch filtering** and the
 **Low pass filter**.
 
@@ -115,6 +123,9 @@ calm. The help icon next to the slider explains the same thing inside the app.
 | 0% | 120 °/s | Only the large, obvious jolts. |
 | 50% (default) | 60 °/s | Tuned against Betaflight blackbox logs. Suits most clips. |
 | 100% | 30 °/s | Also small jolts, but it may mistake real knocks for false ones. |
+
+The tremor floor follows the same setting: a spike counts towards the tremor above a quarter of
+the threshold (15 °/s at 50%).
 
 - **Raise it** if small jolts remain in the stabilized video with the repair on.
 - **Lower it** if real motion, such as a knock or an impact, looks smoothed away.
@@ -143,8 +154,8 @@ To make one:
    since its false rotations are already gone.
 
 {: .note }
-If no false rotations are found at the current sensitivity, no copy is written and FPVFlow tells
-you so. The button is not available in the Android version.
+If neither false rotations nor tremor are found at the current sensitivity, no copy is written
+and FPVFlow tells you so. The button is not available in the Android version.
 
 ## Requirements
 
@@ -169,11 +180,18 @@ firmware update.
   footage, open each affected clip first, or render from `_gyrofix` copies.
 - **Real fast motion.** At high sensitivity a real knock can be taken for a false rotation. Lower
   **Sensitivity** if that happens.
+- **Real vibration and jello.** Jolts or jello that you can already see in the **raw** footage are
+  real camera motion, not Gyrogate. The O4 only records the attitude after its own sensor fusion,
+  and in those moments it is smoother than the picture, so no motion-data repair can remove them,
+  and rolling shutter correction has nothing to work with. Look at the drone instead: bent or
+  chipped props, worn motors, the camera mount, and prop wash in hard manoeuvres near obstacles.
 
 ## Credits
 
-- The algorithm is a port of [o4fix](https://github.com/vadimbryl/o4fix) by vadimbryl, and its
-  output matches o4fix exactly on the public sample clips.
+- The burst repair is a port of [o4fix](https://github.com/vadimbryl/o4fix) by vadimbryl, and
+  with the tremor step off its output matches o4fix exactly on the public sample clips. The
+  tremor step is FPVFlow's own: on the public O4 Pro sample it brings the roll jitter from 0.072
+  to 0.017° per frame.
 - Thanks to [DJIFix](https://github.com/parhipov/DJIFix) by parhipov and
   [djgyrofix](https://github.com/steamvogue/djgyrofix) by steamvogue for their analyses and sample
   footage.

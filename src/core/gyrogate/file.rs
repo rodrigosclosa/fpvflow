@@ -40,7 +40,9 @@ pub struct FileRepairReport {
     pub stored_values: usize,
     pub unique_values: usize,
     pub bursts: Vec<Burst>,
-    /// False when no burst was found: then no copy is written.
+    /// Seconds of single-axis tremor low-passed.
+    pub tremor_seconds: f64,
+    /// False when neither a burst nor tremor was found: then no copy is written.
     pub written: bool,
 }
 
@@ -353,7 +355,7 @@ fn write_temp_copy(src: &Path, dst: &Path, track: &AttitudeTrack, quats: &[Quat4
     }
 }
 
-/// Read, correct and, when bursts were found, write the corrected copy at `dst`.
+/// Read, correct and, when bursts or tremor were found, write the corrected copy at `dst`.
 pub fn repair_file<F: Fn(f64)>(src: &Path, dst: &Path, settings: &Settings, progress: F, cancel_flag: Arc<AtomicBool>) -> io::Result<FileRepairReport> {
     let cancelled = || if cancel_flag.load(Relaxed) { Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")) } else { Ok(()) };
     let track = read_track_with_progress(src, |p| progress(p * 0.45), cancel_flag.clone())?;
@@ -369,6 +371,7 @@ pub fn repair_file<F: Fn(f64)>(src: &Path, dst: &Path, settings: &Settings, prog
         return Err(io::Error::new(io::ErrorKind::Other, "attitude correction returned a wrong number of values"));
     }
     report.bursts = correction.bursts;
+    report.tremor_seconds = correction.tremor_seconds;
     let quats: Vec<Quat4> = unique_of_entry.iter().map(|&u| correction.quats[u]).collect();
     progress(0.5);
     cancelled()?;
@@ -763,12 +766,20 @@ mod tests {
         assert_eq!(track.quats.len(), 10799);
         assert_eq!(dsp::dedup(&track.quats).0.len(), 5400);
 
+        // The default repair also low-passes the tremor around the largest burst.
         let dst = dir.join(corrected_copy_path(&src).file_name().unwrap());
-        let t = std::time::Instant::now();
         let report = repair_file(&src, &dst, &Settings::default(), |_| (), no_cancel()).unwrap();
+        println!("o4lite repair_file, default: {report:?}");
+        assert!(report.written && report.tremor_seconds > 1.0);
+        assert_eq!((report.stored_values, report.unique_values, report.bursts.len()), (10799, 5400, 3));
+
+        // Without the tremor repair (not in o4fix), the values written match o4fix.
+        let no_tremor = Settings { tremor_lowpass_hz: 0.0, ..Default::default() };
+        let t = std::time::Instant::now();
+        let report = repair_file(&src, &dst, &no_tremor, |_| (), no_cancel()).unwrap();
         println!("o4lite repair_file: {:.3} s, {:?}", t.elapsed().as_secs_f64(), report);
         assert!(report.written);
-        assert_eq!((report.stored_values, report.unique_values, report.bursts.len()), (10799, 5400, 3));
+        assert_eq!((report.stored_values, report.unique_values, report.bursts.len(), report.tremor_seconds), (10799, 5400, 3, 0.0));
 
         let ours = read_track(&dst, no_cancel()).unwrap();
         let o4fix = read_track(&samples_dir.join("o4lite_53-58s.o4fix.MP4"), no_cancel()).unwrap();
@@ -806,7 +817,7 @@ mod tests {
         fs::write(&dst, b"previous output").unwrap();
         let cancel = no_cancel();
         let cancel2 = cancel.clone();
-        let err = repair_file(&src, &dst, &Settings::default(), move |p| if p > 0.7 { cancel2.store(true, Relaxed) }, cancel).unwrap_err();
+        let err = repair_file(&src, &dst, &no_tremor, move |p| if p > 0.7 { cancel2.store(true, Relaxed) }, cancel).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::Interrupted);
         assert_eq!(fs::read(&dst).unwrap(), b"previous output");
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "no temp file left behind");
@@ -824,16 +835,19 @@ mod tests {
         assert!(err.contains(&format!("frame {}", track.frames[100])) && err.contains("file offset") && err.contains("wire type 3"), "{err}");
         fs::remove_file(&corrupt).unwrap();
 
-        // O4 Pro: no burst, nothing written.
+        // O4 Pro: no burst, only tremor. Without the tremor repair nothing is written.
         let src = samples_dir.join("o4pro_13-17s.MP4");
         let track = read_track(&src, no_cancel()).unwrap();
         assert_eq!(track.quats.len(), 9600);
         assert_eq!(dsp::dedup(&track.quats).0.len(), 4801);
         let dst = dir.join("o4pro_gyrofix.MP4");
-        let report = repair_file(&src, &dst, &Settings::default(), |_| (), no_cancel()).unwrap();
-        println!("o4pro: {report:?}");
+        let report = repair_file(&src, &dst, &no_tremor, |_| (), no_cancel()).unwrap();
         assert!(!report.written && report.bursts.is_empty());
         assert!(!dst.exists());
+        let report = repair_file(&src, &dst, &Settings::default(), |_| (), no_cancel()).unwrap();
+        println!("o4pro: {report:?}");
+        assert!(report.written && report.bursts.is_empty() && report.tremor_seconds > 2.0);
+        assert!(dst.exists());
 
         // Optional long clean clip (read only).
         if let Ok(clean) = std::env::var("FPVFLOW_GYROGATE_CLEAN_CLIP") {
@@ -847,5 +861,76 @@ mod tests {
         }
 
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Frame-to-frame jitter per axis (°/frame): the rotation over each video frame, minus its
+    /// 5-frame running median, as rms over `frames`. What the stabilization turns into shake.
+    fn frame_jitter(unique: &[Quat4], frame_of_unique: &[u32], frames: std::ops::Range<u32>) -> [f64; 3] {
+        let rates = dsp::body_rates(unique, UNIQUE_RATE_HZ);
+        let n_frames = *frame_of_unique.last().unwrap() as usize + 1;
+        let mut per_frame = vec![[0.0f64; 3]; n_frames];
+        for (r, &f) in rates.iter().zip(frame_of_unique) {
+            for a in 0..3 {
+                per_frame[f as usize][a] += r[a] / UNIQUE_RATE_HZ;
+            }
+        }
+        std::array::from_fn(|a| {
+            let col: Vec<f64> = per_frame.iter().map(|p| p[a]).collect();
+            let hp: Vec<f64> = (frames.start as usize..frames.end as usize).map(|i| {
+                let mut w: Vec<f64> = (i.saturating_sub(2)..(i + 3).min(n_frames)).map(|j| col[j]).collect();
+                w.sort_by(f64::total_cmp);
+                col[i] - w[w.len() / 2]
+            }).collect();
+            (hp.iter().map(|v| v * v).sum::<f64>() / hp.len() as f64).sqrt()
+        })
+    }
+
+    /// Tremor repair on real clips, measured as frame-to-frame jitter. `FPVFLOW_GYROGATE_DIR` as
+    /// for `real_clips`; `FPVFLOW_GYROGATE_TREMOR_CLIP` optionally names the 2026-10-19 O4 Pro
+    /// clip (DJI_20261019174121_0001_D.MP4, 29.97 fps) with roll tremor at 1:28, 2:25, 2:30 and 4:10.
+    #[test]
+    #[ignore]
+    fn tremor_clips() {
+        // Jitter of the repair without and with the tremor step, so the calm stretches compare
+        // like for like: with bursts, o4fix's 20 Hz low-pass already touches the whole clip.
+        let measure = |path: &Path, windows: &[(&str, f64)], fps: f64| -> Vec<([f64; 3], [f64; 3])> {
+            let track = read_track(path, Arc::new(AtomicBool::new(false))).unwrap();
+            let (unique, index) = dsp::dedup(&track.quats);
+            let mut frame_of_unique = vec![0u32; unique.len()];
+            for (i, &u) in index.iter().enumerate().rev() {
+                frame_of_unique[u] = track.frames[i];
+            }
+            let fixed = dsp::repair(&unique, UNIQUE_RATE_HZ, &Settings::default()).unwrap();
+            let bursts_only = dsp::repair(&unique, UNIQUE_RATE_HZ, &Settings { tremor_lowpass_hz: 0.0, ..Default::default() })
+                .map_or(unique.clone(), |c| c.quats);
+            println!("{}: {} bursts, {:.1} s of tremor", path.display(), fixed.bursts.len(), fixed.tremor_seconds);
+            windows.iter().map(|&(name, t)| {
+                let range = if t < 0.0 { 2..frame_of_unique[unique.len() - 2] - 2 } else { ((t - 3.0) * fps) as u32..((t + 3.0) * fps) as u32 };
+                let (before, after) = (frame_jitter(&bursts_only, &frame_of_unique, range.clone()), frame_jitter(&fixed.quats, &frame_of_unique, range));
+                println!("  {name}: jitter {before:.3?} -> {after:.3?} °/frame");
+                (before, after)
+            }).collect()
+        };
+        if let Ok(dir) = std::env::var("FPVFLOW_GYROGATE_DIR") {
+            measure(&Path::new(&dir).join("o4pro_13-17s.MP4"), &[("whole clip", -1.0)], 0.0);
+        }
+        let Ok(clip) = std::env::var("FPVFLOW_GYROGATE_TREMOR_CLIP") else { return; };
+        let windows = [("1:28", 88.0), ("2:25", 145.0), ("2:30", 150.0), ("4:10", 250.0), ("calm 3:20", 200.0), ("calm 1:00", 60.0)];
+        let result = measure(Path::new(&clip), &windows, 30000.0 / 1001.0);
+        // Measured 2026-10-21 on the tremor axis: 0.075 -> 0.037, 0.050 -> 0.025, 0.050 -> 0.038
+        // and 0.073 -> 0.044 °/frame; the calm stretches unchanged.
+        let mut ratios = Vec::new();
+        for ((name, _), (before, after)) in windows.iter().zip(&result) {
+            let axis = (0..3).max_by(|&a, &b| before[a].total_cmp(&before[b])).unwrap();
+            if name.starts_with("calm") {
+                for a in 0..3 {
+                    assert!((after[a] - before[a]).abs() <= 0.02 * before[a], "{name}: axis {a} changed");
+                }
+            } else {
+                ratios.push(after[axis] / before[axis]);
+                assert!(after[axis] <= 0.8 * before[axis], "{name}: tremor axis {axis} only {:.3} -> {:.3}", before[axis], after[axis]);
+            }
+        }
+        assert!(ratios.iter().sum::<f64>() / ratios.len() as f64 <= 0.65, "{ratios:?}");
     }
 }

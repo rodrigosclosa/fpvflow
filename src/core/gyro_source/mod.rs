@@ -636,9 +636,9 @@ impl GyroSource {
                 // fusion's pull-back of them, which the glitch filter and low-pass would smear.
                 if self.imu_transforms.gyrogate_filter && self.quaternions.len() >= 8 {
                     let settings = crate::gyrogate::Settings::from_strength(self.imu_transforms.gyrogate_strength);
-                    let removed = crate::gyrogate::memory::repair(&mut self.quaternions, &settings);
-                    if removed > 0 {
-                        log::info!("Gyrogate: removed {} false burst(s)", removed);
+                    let (removed, tremor_s) = crate::gyrogate::memory::repair(&mut self.quaternions, &settings);
+                    if removed > 0 || tremor_s > 0.0 {
+                        log::info!("Gyrogate: removed {} false burst(s), {:.1} s of tremor", removed, tremor_s);
                     }
                 }
                 if self.imu_transforms.glitch_filter && self.quaternions.len() >= 8 {

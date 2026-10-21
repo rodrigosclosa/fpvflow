@@ -21,6 +21,8 @@ pub struct Summary {
     pub largest_deg: f64,
     /// Total length of the bursts, seconds.
     pub seconds: f64,
+    /// Seconds of single-axis tremor the repair low-passes.
+    pub tremor_seconds: f64,
 }
 
 /// The unique attitude samples of `data`, and for every entry the index of its unique sample.
@@ -41,7 +43,7 @@ fn unique_samples(data: &TimeQuat) -> Option<(Vec<Quat4>, Vec<usize>)> {
     Some((unique, index))
 }
 
-/// Count the false bursts without changing anything.
+/// Count the false bursts and the tremor without changing anything.
 pub fn analyze(data: &TimeQuat, settings: &Settings) -> Option<Summary> {
     let (unique, _) = unique_samples(data)?;
     let bursts = dsp::detect(&unique, UNIQUE_RATE_HZ, settings);
@@ -50,14 +52,15 @@ pub fn analyze(data: &TimeQuat, settings: &Settings) -> Option<Summary> {
         total_deg: bursts.iter().map(|b| b.area_deg.abs()).sum(),
         largest_deg: bursts.iter().map(|b| b.area_deg.abs()).fold(0.0, f64::max),
         seconds: bursts.iter().map(|b| (b.end_sample - b.start_sample + 1) as f64).sum::<f64>() / UNIQUE_RATE_HZ,
+        tremor_seconds: dsp::detect_tremor(&unique, UNIQUE_RATE_HZ, settings),
     })
 }
 
-/// Repair `data` in place. Returns the number of bursts removed; when none is found the data
-/// is left untouched.
-pub fn repair(data: &mut TimeQuat, settings: &Settings) -> usize {
-    let Some((unique, index)) = unique_samples(data) else { return 0; };
-    let Some(correction) = dsp::repair(&unique, UNIQUE_RATE_HZ, settings) else { return 0; };
+/// Repair `data` in place. Returns the number of bursts removed and the seconds of tremor
+/// low-passed; when neither is found the data is left untouched.
+pub fn repair(data: &mut TimeQuat, settings: &Settings) -> (usize, f64) {
+    let Some((unique, index)) = unique_samples(data) else { return (0, 0.0); };
+    let Some(correction) = dsp::repair(&unique, UNIQUE_RATE_HZ, settings) else { return (0, 0.0); };
     for (q, &i) in data.values_mut().zip(index.iter()) {
         let [w, x, y, z] = correction.quats[i];
         let mut new = Quaternion::new(w, x, y, z);
@@ -67,7 +70,7 @@ pub fn repair(data: &mut TimeQuat, settings: &Settings) -> usize {
         }
         *q = Quat64::from_quaternion(new);
     }
-    correction.bursts.len()
+    (correction.bursts.len(), correction.tremor_seconds)
 }
 
 #[cfg(test)]
@@ -107,7 +110,7 @@ mod tests {
         let mut data = stored_twice(&unique);
         let summary = analyze(&data, &Settings::default()).unwrap();
         assert_eq!(summary.bursts, expected.bursts.len());
-        assert_eq!(repair(&mut data, &Settings::default()), expected.bursts.len());
+        assert_eq!(repair(&mut data, &Settings::default()).0, expected.bursts.len());
         let worst = data.values().enumerate().map(|(i, q)| angle_deg(q, &to_gyroflow(&expected.quats[i / 2]))).fold(0.0, f64::max);
         assert!(worst < 1e-9, "in-memory repair differs from the raw-frame repair by {worst}°");
     }
@@ -118,7 +121,7 @@ mod tests {
         let mut data = stored_twice(&dsp::integrate([1.0, 0.0, 0.0, 0.0], &rates, UNIQUE_RATE_HZ));
         let before = data.clone();
         assert_eq!(analyze(&data, &Settings::default()).unwrap().bursts, 0);
-        assert_eq!(repair(&mut data, &Settings::default()), 0);
+        assert_eq!(repair(&mut data, &Settings::default()), (0, 0.0));
         assert!(data == before);
     }
 
@@ -128,7 +131,7 @@ mod tests {
         // 200 Hz: every 5th sample of the 1 kHz track.
         let mut data: TimeQuat = unique.iter().step_by(5).enumerate().map(|(i, q)| (i as i64 * 5000, to_gyroflow(q))).collect();
         assert!(analyze(&data, &Settings::default()).is_none());
-        assert_eq!(repair(&mut data, &Settings::default()), 0);
+        assert_eq!(repair(&mut data, &Settings::default()), (0, 0.0));
     }
 
     #[test]
@@ -161,7 +164,7 @@ mod tests {
         assert!(report.written);
 
         let mut in_memory = load(&src);
-        assert_eq!(repair(&mut in_memory, &Settings::default()), 3);
+        assert_eq!(repair(&mut in_memory, &Settings::default()).0, 3);
         let copy = load(&dst);
         let _ = std::fs::remove_file(&dst);
         assert_eq!(in_memory.len(), copy.len());

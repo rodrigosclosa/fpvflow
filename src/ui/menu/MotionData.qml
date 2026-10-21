@@ -32,7 +32,7 @@ MenuItem {
     property real gyrogateProgress: 0;
     // The clip the corrected copy is being written for, to apply it only if still loaded.
     property string gyrogateCopyFor: "";
-    readonly property bool gyrogateRecommended: !!gyrogate && !!gyrogate.summary && gyrogate.summary.bursts > 0
+    readonly property bool gyrogateRecommended: !!gyrogate && !!gyrogate.summary && (gyrogate.summary.bursts > 0 || gyrogate.summary.tremor_seconds > 0)
                                                 && gyrogate.unit.chip != "mp66" && !gyrogate.repaired_copy;
 
     FileDialog {
@@ -378,10 +378,13 @@ MenuItem {
             if (!g) return "";
             if (g.repaired_copy) return qsTr("This is a corrected copy: its false rotations were already removed.");
             if (!g.summary) return qsTr("No 1 kHz attitude data in this clip. Record with RockSteady and HorizonSteady off to be able to repair it.");
-            if (g.summary.bursts == 0) return qsTr("No false rotations found in this clip.");
-            if (g.unit.chip == "mp66") return qsTr("%n short single-axis jolt(s) found. With the original MP66 gyro these are usually real knocks, such as setting the drone down, so the repair is off by default.", "", g.summary.bursts);
-            return qsTr("%n false rotation(s) found in this clip, %1° in total, the largest %2°.", "", g.summary.bursts)
-                       .arg(g.summary.total_deg.toFixed(1)).arg(g.summary.largest_deg.toFixed(1));
+            const tremor = g.summary.tremor_seconds > 0? qsTr("Dense single-axis tremor in %1 s of the clip.").arg(g.summary.tremor_seconds.toFixed(1)) : "";
+            if (g.summary.bursts == 0) return tremor || qsTr("No false rotations found in this clip.");
+            const bursts = g.unit.chip == "mp66"
+                ? qsTr("%n short single-axis jolt(s) found. With the original MP66 gyro these are usually real knocks, such as setting the drone down, so the repair is off by default.", "", g.summary.bursts)
+                : qsTr("%n false rotation(s) found in this clip, %1° in total, the largest %2°.", "", g.summary.bursts)
+                      .arg(g.summary.total_deg.toFixed(1)).arg(g.summary.largest_deg.toFixed(1));
+            return tremor? bursts + " " + tremor : bursts;
         }
 
         InfoMessageSmall {
@@ -392,7 +395,7 @@ MenuItem {
         CheckBoxWithContent {
             id: gyrogatecb;
             text: qsTr("Remove DJI Gyrogate false rotations");
-            tooltip: qsTr("Removes the short false rotations recorded by the ICM-40609-D gyro of DJI O4 units, and the slow drift the camera adds while pulling them back. Clips without false rotations are left untouched.");
+            tooltip: qsTr("Removes the short false rotations recorded by the ICM-40609-D gyro of DJI O4 units and the slow drift the camera adds while pulling them back, and smooths the dense single-axis tremor the same gyro records. Clips without either are left untouched.");
             onCheckedChanged: {
                 controller.set_gyrogate_filter(checked, gyrogateStrength.value);
                 Qt.callLater(controller.recompute_gyro);
@@ -403,7 +406,8 @@ MenuItem {
                 spacing: 4 * dpiScale;
                 readonly property string help: qsTr("How small a false rotation can be and still be removed. A rotation counts as false when one axis jumps above the threshold for a few milliseconds while the other two stay calm.") + "\n\n" +
                          qsTr("0%: threshold 120 °/s, only the large, obvious jolts.\n50% (default): threshold 60 °/s, tuned against Betaflight blackbox logs.\n100%: threshold 30 °/s, also small jolts, but it may mistake real knocks for false ones.") + "\n\n" +
-                         qsTr("Raise it if small jolts remain in the stabilized video with the repair on. Lower it if real motion, such as a knock or an impact, looks smoothed away. The value is saved with the project and used for the corrected copy.");
+                         qsTr("Raise it if small jolts remain in the stabilized video with the repair on. Lower it if real motion, such as a knock or an impact, looks smoothed away. The value is saved with the project and used for the corrected copy.") + "\n\n" +
+                         qsTr("The same setting moves the tremor floor, a quarter of the threshold (15 °/s at 50%). The tremor is smoothed on its axis only, where small spikes pile up, many per second.");
                 Row {
                     spacing: 2 * dpiScale;
                     BasicText {
@@ -473,7 +477,8 @@ MenuItem {
                     return;
                 }
                 const r = JSON.parse(report || "{}");
-                window.showNotification(Modal.Info, qsTr("Corrected copy saved to %1 (%n false rotation(s) removed).", "", (r.bursts || []).length).arg("<b>" + filesystem.display_url(url) + "</b>"));
+                const tremor = r.tremor_seconds > 0? " " + qsTr("Tremor smoothed in %1 s.").arg(r.tremor_seconds.toFixed(1)) : "";
+                window.showNotification(Modal.Info, qsTr("Corrected copy saved to %1 (%n false rotation(s) removed).", "", (r.bursts || []).length).arg("<b>" + filesystem.display_url(url) + "</b>") + tremor);
                 if (root.gyrogateCopyFor != window.videoArea.loadedFileUrl.toString() + "|" + root.filename) {
                     return; // Another clip was opened meanwhile.
                 }

@@ -139,8 +139,10 @@ FPVFlow detects and repairs it, from the motion data alone:
   many false rotations the clip contains.
 - **Repair in the stabilization.** *Remove DJI Gyrogate false rotations* is turned on
   automatically when you open an affected clip, and saved with the project. It removes each false burst, adds back the camera's pull-back
-  of it, and low-passes the result. A sensitivity slider trades catching smaller bursts against
-  touching real fast motion. Clips without false rotations are left bit-for-bit untouched.
+  of it, and low-passes the result. It also smooths the dense single-axis tremor the same gyro
+  records - many small spikes per second, usually on roll - on that axis only and only where it
+  piles up. A sensitivity slider trades catching smaller bursts against touching real fast motion.
+  Clips with neither are left bit-for-bit untouched.
 - **Corrected copy.** *Save corrected copy* writes `<name>_gyrofix.MP4` next to the original
   with only the attitude values rewritten - same size, video and audio untouched, the original
   never modified - and switches the motion data to it. The copy opens like any DJI clip in

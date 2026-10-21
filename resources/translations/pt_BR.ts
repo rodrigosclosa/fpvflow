@@ -1751,6 +1751,11 @@ Você deseja enviar seu perfil?</translation>
       <source>No false rotations found in this clip.</source>
       <translation>Nenhuma rotação falsa encontrada neste clipe.</translation>
     </message>
+    <message>
+      <location filename="../../src/ui/menu/MotionData.qml" line="381"/>
+      <source>Dense single-axis tremor in %1 s of the clip.</source>
+      <translation>Tremor denso num eixo só em %1 s do clipe.</translation>
+    </message>
     <message numerus="yes">
       <location filename="../../src/ui/menu/MotionData.qml" line="382"/>
       <source>%n short single-axis jolt(s) found. With the original MP66 gyro these are usually real knocks, such as setting the drone down, so the repair is off by default.</source>
@@ -1774,8 +1779,8 @@ Você deseja enviar seu perfil?</translation>
     </message>
     <message>
       <location filename="../../src/ui/menu/MotionData.qml" line="395"/>
-      <source>Removes the short false rotations recorded by the ICM-40609-D gyro of DJI O4 units, and the slow drift the camera adds while pulling them back. Clips without false rotations are left untouched.</source>
-      <translation>Remove as rotações falsas curtas registradas pelo gyro ICM-40609-D das unidades DJI O4 e a deriva lenta que a câmera adiciona ao puxá-las de volta. Clipes sem rotações falsas não são alterados.</translation>
+      <source>Removes the short false rotations recorded by the ICM-40609-D gyro of DJI O4 units and the slow drift the camera adds while pulling them back, and smooths the dense single-axis tremor the same gyro records. Clips without either are left untouched.</source>
+      <translation>Remove as rotações falsas curtas registradas pelo gyro ICM-40609-D das unidades DJI O4 e a deriva lenta que a câmera adiciona ao puxá-las de volta, e suaviza o tremor denso num eixo só que o mesmo gyro registra. Clipes sem nenhum dos dois não são alterados.</translation>
     </message>
     <message>
       <location filename="../../src/ui/menu/MotionData.qml" line="404"/>
@@ -1795,6 +1800,11 @@ Você deseja enviar seu perfil?</translation>
       <location filename="../../src/ui/menu/MotionData.qml" line="406"/>
       <source>Raise it if small jolts remain in the stabilized video with the repair on. Lower it if real motion, such as a knock or an impact, looks smoothed away. The value is saved with the project and used for the corrected copy.</source>
       <translation>Aumente se ainda sobrarem pequenos trancos no vídeo estabilizado com a correção ligada. Diminua se um movimento real, como uma batida ou um impacto, parecer suavizado demais. O valor é salvo com o projeto e usado na cópia corrigida.</translation>
+    </message>
+    <message>
+      <location filename="../../src/ui/menu/MotionData.qml" line="410"/>
+      <source>The same setting moves the tremor floor, a quarter of the threshold (15 °/s at 50%). The tremor is smoothed on its axis only, where small spikes pile up, many per second.</source>
+      <translation>A mesma configuração move o piso do tremor, um quarto do limiar (15 °/s em 50%). O tremor é suavizado só no seu eixo, onde os picos pequenos se acumulam, vários por segundo.</translation>
     </message>
     <message>
       <location filename="../../src/ui/menu/MotionData.qml" line="411"/>
@@ -1833,6 +1843,11 @@ Você deseja enviar seu perfil?</translation>
         <numerusform>Cópia corrigida salva em %1 (%n rotação falsa removida).</numerusform>
         <numerusform>Cópia corrigida salva em %1 (%n rotações falsas removidas).</numerusform>
       </translation>
+    </message>
+    <message>
+      <location filename="../../src/ui/menu/MotionData.qml" line="480"/>
+      <source>Tremor smoothed in %1 s.</source>
+      <translation>Tremor suavizado em %1 s.</translation>
     </message>
     <message>
       <location filename="../../src/ui/menu/MotionData.qml" line="499"/>

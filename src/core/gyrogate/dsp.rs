@@ -24,6 +24,13 @@ const EDGE_WINDOW_MS: f64 = 15.0;
 // adaptive_lowpass() keyword defaults of o4fix.
 const BUSY_LEVEL_DPS: f64 = 20.0;
 const SMOOTHING_S: f64 = 0.5;
+// Single-axis tremor (FPVFlow, not in o4fix): dense runs of single-axis deviations too small or
+// too close together for remove_impulses. Tuned on a 2026 O4 Pro clip, where they sit on the roll
+// axis, 20–56 °/s and 0.2–0.35° each, many per second, while calm stretches have none.
+const TREMOR_FLOOR_RATIO: f64 = 0.25; // of the impulse threshold: 15 °/s at the default 60
+const TREMOR_WINDOW_S: f64 = 0.5;
+const TREMOR_DENSITY_START: f64 = 10.0; // pure samples per second where the low-pass starts...
+const TREMOR_DENSITY_FULL: f64 = 40.0; // ...and where it fully applies
 
 /// Body angular rate (deg/s) between consecutive samples: `n` quaternions -> `n - 1` rates.
 pub fn body_rates(quats: &[Quat4], rate_hz: f64) -> Vec<[f64; 3]> {
@@ -155,30 +162,47 @@ pub fn detect(quats: &[Quat4], rate_hz: f64, settings: &Settings) -> Vec<Burst> 
     remove_impulses(&body_rates(quats, rate_hz), rate_hz, settings.impulse_threshold_dps).1
 }
 
+/// Seconds of single-axis tremor that `repair` would low-pass, for a summary at load time.
+pub fn detect_tremor(quats: &[Quat4], rate_hz: f64, settings: &Settings) -> f64 {
+    if quats.len() < 2 || !valid(quats) {
+        return 0.0;
+    }
+    tremor_weights(&body_rates(quats, rate_hz), rate_hz, settings).map_or(0.0, |w| tremor_seconds(&w, rate_hz))
+}
+
 /// o4fix `correct()`: the whole pipeline, applied even when no burst is found.
 /// Fewer than 2 samples are returned unchanged (o4fix raises).
 pub fn correct(quats: &[Quat4], rate_hz: f64, settings: &Settings) -> Correction {
     if quats.len() < 2 {
-        return Correction { quats: quats.to_vec(), bursts: Vec::new() };
+        return Correction { quats: quats.to_vec(), bursts: Vec::new(), tremor_seconds: 0.0 };
     }
     let rates = body_rates(quats, rate_hz);
     let (cleaned, bursts) = remove_impulses(&rates, rate_hz, settings.impulse_threshold_dps);
-    finish(quats, &rates, cleaned, bursts, rate_hz, settings)
+    let filtered = finish(&rates, cleaned, rate_hz, settings);
+    Correction { quats: integrate(quats[0], &filtered, rate_hz), bursts, tremor_seconds: 0.0 }
 }
 
-/// FPVFlow policy: `None` when no burst is found, so clean footage stays bit-for-bit untouched
-/// (o4fix low-passes every clip); otherwise the same result as `correct()`. `None` too when the
-/// track holds an invalid quaternion.
+/// FPVFlow policy: `None` when neither a burst nor tremor is found, so clean footage stays
+/// bit-for-bit untouched (o4fix low-passes every clip). With bursts, the same result as
+/// `correct()`; then the tremor, if any, is low-passed on its axis. `None` too when the track
+/// holds an invalid quaternion.
 pub fn repair(quats: &[Quat4], rate_hz: f64, settings: &Settings) -> Option<Correction> {
     if quats.len() < 2 || !valid(quats) {
         return None;
     }
     let rates = body_rates(quats, rate_hz);
     let (cleaned, bursts) = remove_impulses(&rates, rate_hz, settings.impulse_threshold_dps);
-    if bursts.is_empty() {
+    let tremor = tremor_weights(&rates, rate_hz, settings);
+    if bursts.is_empty() && tremor.is_none() {
         return None;
     }
-    Some(finish(quats, &rates, cleaned, bursts, rate_hz, settings))
+    let mut filtered = if bursts.is_empty() { rates } else { finish(&rates, cleaned, rate_hz, settings) };
+    let mut tremor_s = 0.0;
+    if let Some(weights) = tremor {
+        tremor_s = tremor_seconds(&weights, rate_hz);
+        filtered = remove_tremor(&filtered, &weights, rate_hz, settings.tremor_lowpass_hz);
+    }
+    Some(Correction { quats: integrate(quats[0], &filtered, rate_hz), bursts, tremor_seconds: tremor_s })
 }
 
 /// o4fix `dji.read_track` rejects a track with a non-finite quaternion or one of norm < 0.5; one
@@ -187,8 +211,8 @@ fn valid(quats: &[Quat4]) -> bool {
     quats.iter().all(|q| q.iter().all(|v| v.is_finite()) && q.iter().map(|v| v * v).sum::<f64>() >= 0.25)
 }
 
-/// The rest of `correct()` after impulse removal.
-fn finish(quats: &[Quat4], rates: &[[f64; 3]], mut cleaned: Vec<[f64; 3]>, bursts: Vec<Burst>, rate_hz: f64, settings: &Settings) -> Correction {
+/// The rest of `correct()` after impulse removal, up to the filtered rates.
+fn finish(rates: &[[f64; 3]], mut cleaned: Vec<[f64; 3]>, rate_hz: f64, settings: &Settings) -> Vec<[f64; 3]> {
     let removed: Vec<[f64; 3]> = rates.iter().zip(&cleaned).map(|(r, c)| [r[0] - c[0], r[1] - c[1], r[2] - c[2]]).collect();
     if settings.pullback_tau_s != 0.0 {
         cleaned = remove_pullback(&cleaned, &removed, rate_hz, settings.pullback_tau_s);
@@ -198,7 +222,54 @@ fn finish(quats: &[Quat4], rates: &[[f64; 3]], mut cleaned: Vec<[f64; 3]>, burst
     } else {
         cleaned = lowpass(&cleaned, rate_hz, settings.lowpass_hz);
     }
-    Correction { quats: integrate(quats[0], &cleaned, rate_hz), bursts }
+    cleaned
+}
+
+/// Per axis, how much of the tremor low-pass applies to each sample (0 to 1), or `None` when no
+/// axis reaches half weight anywhere. A sample is "pure" when its axis deviates from the 61 ms
+/// running median by more than the floor while the other two stay under `PURITY` of it, as in
+/// `remove_impulses`; the weight ramps with how many pure samples fall in a 0.5 s window.
+fn tremor_weights(rates: &[[f64; 3]], rate_hz: f64, settings: &Settings) -> Option<[Vec<f64>; 3]> {
+    let window = (TREMOR_WINDOW_S * rate_hz) as usize;
+    if settings.tremor_lowpass_hz == 0.0 || window == 0 || rates.len() < window {
+        return None;
+    }
+    let floor = settings.impulse_threshold_dps * TREMOR_FLOOR_RATIO;
+    let median_window = (MEDIAN_WINDOW_MS * rate_hz / 1000.0) as usize | 1;
+    let deviation: [Vec<f64>; 3] = std::array::from_fn(|a| {
+        let col: Vec<f64> = rates.iter().map(|r| r[a]).collect();
+        col.iter().zip(running_median(&col, median_window)).map(|(x, b)| (x - b).abs()).collect()
+    });
+    let weights: [Vec<f64>; 3] = std::array::from_fn(|a| {
+        let (dev, o1, o2) = (&deviation[a], &deviation[(a + 1) % 3], &deviation[(a + 2) % 3]);
+        let pure: Vec<f64> = (0..rates.len()).map(|i| (dev[i] > floor && o1[i].max(o2[i]) < PURITY * dev[i]) as u8 as f64).collect();
+        let ramp: Vec<f64> = uniform_filter1d(&pure, window).into_iter()
+            .map(|share| ((share * rate_hz - TREMOR_DENSITY_START) / (TREMOR_DENSITY_FULL - TREMOR_DENSITY_START)).clamp(0.0, 1.0))
+            .collect();
+        uniform_filter1d(&ramp, window)
+    });
+    weights.iter().flatten().any(|&w| w >= 0.5).then_some(weights)
+}
+
+/// Seconds where the tremor low-pass applies at least halfway on some axis.
+fn tremor_seconds(weights: &[Vec<f64>; 3], rate_hz: f64) -> f64 {
+    (0..weights[0].len()).filter(|&i| weights.iter().any(|w| w[i] >= 0.5)).count() as f64 / rate_hz
+}
+
+/// Blend each axis towards its low-pass at `cutoff_hz` by the tremor weight.
+fn remove_tremor(rates: &[[f64; 3]], weights: &[Vec<f64>; 3], rate_hz: f64, cutoff_hz: f64) -> Vec<[f64; 3]> {
+    let sos = butter4_sos(cutoff_hz / (rate_hz / 2.0));
+    let mut out = rates.to_vec();
+    for a in 0..3 {
+        if weights[a].iter().all(|&w| w == 0.0) {
+            continue;
+        }
+        let col: Vec<f64> = rates.iter().map(|r| r[a]).collect();
+        for ((o, smooth), w) in out.iter_mut().zip(sosfiltfilt(&sos, &col)).zip(&weights[a]) {
+            o[a] = (1.0 - w) * o[a] + w * smooth;
+        }
+    }
+    out
 }
 
 /// Bursts merge across short gaps, and across longer ones only when the gap jitters sample to sample.
@@ -608,6 +679,7 @@ mod tests {
         let quats = integrate([0.8, 0.2, -0.4, 0.4], &clean_rates(5000), 1000.0);
         let settings = Settings::default();
         assert!(detect(&quats, 1000.0, &settings).is_empty());
+        assert_eq!(detect_tremor(&quats, 1000.0, &settings), 0.0);
         assert!(repair(&quats, 1000.0, &settings).is_none());
         // correct() still low-passes, as o4fix does.
         assert!(correct(&quats, 1000.0, &settings).bursts.is_empty());
@@ -615,12 +687,72 @@ mod tests {
         assert_eq!(correct(&quats[..1], 1000.0, &settings).quats, &quats[..1]);
     }
 
+    /// `clean_rates` with a 2 s run of small pure spikes on axis 1 from sample 2000: half-sines
+    /// of 35 °/s and 8 ms every 40 ms, alternating in sign, below the 60 °/s burst threshold.
+    /// `axes` picks which axes carry the spikes.
+    fn rates_with_tremor(axes: [bool; 3]) -> Vec<[f64; 3]> {
+        let mut rates = clean_rates(6000);
+        for (k, start) in (2000..4000).step_by(40).enumerate() {
+            let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+            for j in 0..8 {
+                for a in (0..3).filter(|&a| axes[a]) {
+                    rates[start + j][a] += sign * 35.0 * (std::f64::consts::PI * (j as f64 + 0.5) / 8.0).sin();
+                }
+            }
+        }
+        rates
+    }
+
+    #[test]
+    fn gyrogate_tremor_is_low_passed_on_its_axis_only() {
+        let truth = clean_rates(6000);
+        let rates = rates_with_tremor([false, true, false]);
+        let quats = integrate([0.8, 0.2, -0.4, 0.4], &rates, 1000.0);
+        let settings = Settings::default();
+        assert!(detect(&quats, 1000.0, &settings).is_empty(), "the spikes are below the burst threshold");
+        let c = repair(&quats, 1000.0, &settings).expect("tremor found");
+        assert!(c.bursts.is_empty());
+        assert!((1.5..=2.5).contains(&c.tremor_seconds), "tremor seconds {}", c.tremor_seconds);
+        assert_eq!(detect_tremor(&quats, 1000.0, &settings), c.tremor_seconds);
+
+        let out = body_rates(&c.quats, 1000.0);
+        let rms = |a: &[[f64; 3]], b: &[[f64; 3]], axis: usize, r: std::ops::Range<usize>| {
+            (r.clone().map(|i| (a[i][axis] - b[i][axis]).powi(2)).sum::<f64>() / r.len() as f64).sqrt()
+        };
+        let (before, after) = (rms(&rates, &truth, 1, 2200..3800), rms(&out, &truth, 1, 2200..3800));
+        println!("tremor axis error vs truth: {before:.2} -> {after:.2} °/s");
+        assert!(after < 0.4 * before);
+        // The other axes, and the tremor axis away from the tremor, are left as they were.
+        for (axis, range) in [(0, 0..6000), (2, 0..6000), (1, 0..1000), (1, 5000..5999)] {
+            let worst = range.clone().map(|i| (out[i][axis] - rates[i][axis]).abs()).fold(0.0, f64::max);
+            assert!(worst < 1e-6, "axis {axis} {range:?} changed by {worst} °/s");
+        }
+    }
+
+    #[test]
+    fn gyrogate_tremor_needs_a_single_axis() {
+        // The same spikes on all three axes look like real vibration, not the sensor defect.
+        let quats = integrate([0.8, 0.2, -0.4, 0.4], &rates_with_tremor([true, true, true]), 1000.0);
+        assert_eq!(detect_tremor(&quats, 1000.0, &Settings::default()), 0.0);
+        assert!(repair(&quats, 1000.0, &Settings::default()).is_none());
+    }
+
+    #[test]
+    fn gyrogate_tremor_can_be_turned_off() {
+        let quats = integrate([0.8, 0.2, -0.4, 0.4], &rates_with_tremor([false, true, false]), 1000.0);
+        let off = Settings { tremor_lowpass_hz: 0.0, ..Default::default() };
+        assert_eq!(detect_tremor(&quats, 1000.0, &off), 0.0);
+        assert!(repair(&quats, 1000.0, &off).is_none());
+    }
+
     #[test]
     fn gyrogate_repair_matches_correct() {
         let f = read_fixture(include_bytes!("testdata/o4fix_synthetic.bin"), &mut 0);
-        let settings = Settings::default();
+        // The fixture's jittery 94 ms burst on axis 1 also counts as tremor: compare without it.
+        let settings = Settings { tremor_lowpass_hz: 0.0, ..Default::default() };
         let c = correct(&f.input, 1000.0, &settings);
         let r = repair(&f.input, 1000.0, &settings).expect("bursts present");
+        assert_eq!(r.tremor_seconds, 0.0);
         assert_eq!(r.quats, c.quats);
         assert_eq!(r.bursts, c.bursts);
         assert_eq!(detect(&f.input, 1000.0, &settings), c.bursts);
