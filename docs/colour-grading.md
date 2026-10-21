@@ -97,53 +97,53 @@ Moving the slider updates the preview immediately.
 
 ## Colour adjustments
 
-The adjustments live in the collapsible **Correção Básica** section at the bottom of the panel.
+The adjustments live in the collapsible **Basic correction** section at the bottom of the panel.
 It is closed by default, since the common case is a LUT and nothing else. Click it to open it.
 
 {: .note }
-The adjustment labels are currently shown in Portuguese in every interface language. The tables
-below give the label exactly as it appears in the app, with its English meaning.
+The labels follow the app language. The tables below give the English label and, for the
+Portuguese interface (pt_BR), the label you see there.
 
-All sliders start at 0, which leaves the image untouched. **Redefinir ajustes** (reset
-adjustments) puts every slider back to 0. The adjustments work with or without a LUT: exposure,
+All sliders start at 0, which leaves the image untouched. **Reset adjustments** puts every
+slider back to 0. The adjustments work with or without a LUT: exposure,
 contrast and vignette are useful on their own.
 
-### Luz (light)
+### Light
 
 All range from -100 to +100 %.
 
-| Label in the app | Meaning | What it does |
+| Label | In pt_BR | What it does |
 |:--|:--|:--|
-| **Exposição** | Exposure | Brightens or darkens like opening or closing the aperture, computed in linear light. The ends of the slider are 2 stops either way. |
-| **Luminância** | Luminance | A plain brightness gain on the displayed image, up to 50 % either way. Same direction as exposure but a different curve, which is why both exist. |
-| **Contraste** | Contrast | Spreads or squeezes the tones around middle grey, so the overall brightness stays put. At -100 the image goes flat grey. |
-| **Destaques** | Highlights | Brightens or darkens the upper half of the tonal range. |
-| **Sombras** | Shadows | Brightens or darkens the lower half of the tonal range. |
-| **Brancos** | Whites | Like highlights, but only the brightest quarter of the tones. |
-| **Pretos** | Blacks | Like shadows, but only the darkest quarter of the tones. |
+| **Exposure** | Exposição | Brightens or darkens like opening or closing the aperture, computed in linear light. The ends of the slider are 2 stops either way. |
+| **Luminance** | Luminância | A plain brightness gain on the displayed image, up to 50 % either way. Same direction as exposure but a different curve, which is why both exist. |
+| **Contrast** | Contraste | Spreads or squeezes the tones around middle grey, so the overall brightness stays put. At -100 the image goes flat grey. |
+| **Highlights** | Destaques | Brightens or darkens the upper half of the tonal range. |
+| **Shadows** | Sombras | Brightens or darkens the lower half of the tonal range. |
+| **Whites** | Brancos | Like highlights, but only the brightest quarter of the tones. |
+| **Blacks** | Pretos | Like shadows, but only the darkest quarter of the tones. |
 
 The four tonal controls blend smoothly into each other, so there are no hard edges in skies and
 gradients.
 
-### Cor (colour)
+### Color
 
 All range from -100 to +100 %.
 
-| Label in the app | Meaning | What it does |
+| Label | In pt_BR | What it does |
 |:--|:--|:--|
-| **Temperatura** | Temperature | Positive warms the image (more red, less blue), negative cools it. |
-| **Matiz** | Tint | Positive pushes towards magenta, negative towards green. Useful for correcting a green cast. |
-| **Saturação** | Saturation | Makes every colour stronger or weaker. At -100 the image is black and white. |
-| **Vivacidade** | Vibrance | Saturation that holds back on colours that are already strong, so skies and skin do not blow out first. |
+| **Temperature** | Temperatura | Positive warms the image (more red, less blue), negative cools it. |
+| **Tint** | Matiz | Positive pushes towards magenta, negative towards green. Useful for correcting a green cast. |
+| **Saturation** | Saturação | Makes every colour stronger or weaker. At -100 the image is black and white. |
+| **Vibrance** | Vivacidade | Saturation that holds back on colours that are already strong, so skies and skin do not blow out first. |
 
-### Efeito (effect)
+### Effect
 
 Both range from 0 to 100 %.
 
-| Label in the app | Meaning | What it does |
+| Label | In pt_BR | What it does |
 |:--|:--|:--|
-| **Nitidez** | Sharpness | Sharpens the image. |
-| **Vignette** | Vignette | Darkens the corners. Higher values darken more; the centre of the frame is never touched, and the vignette stays round on wide frames. |
+| **Sharpness** | Nitidez | Sharpens the image. |
+| **Vignette** | Vinheta | Darkens the corners. Higher values darken more; the centre of the frame is never touched, and the vignette stays round on wide frames. |
 
 ## Order of operations
 

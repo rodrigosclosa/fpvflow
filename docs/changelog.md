@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Changelog
-description: "What changed in each FPVFlow release, newest first: the DJI O4 Gyrogate repair, the beep-anchored audio auto-sync, faster LUT exports and more."
+description: "What changed in each FPVFlow release, newest first: the Gyrogate tremor repair, the DJI O4 Gyrogate repair, the beep-anchored audio auto-sync, faster LUT exports and more."
 nav_order: 13
 ---
 
@@ -14,6 +14,50 @@ Windows, macOS and Linux.
 
 1. TOC
 {:toc}
+
+---
+
+## 1.0.4
+
+[Release page](https://github.com/rodrigosclosa/fpvflow/releases/tag/v1.0.4){: .btn .btn-primary }
+
+### Gyrogate: the single-axis tremor is smoothed too
+
+Besides the short false rotations, the ICM-40609-D gyro of DJI O4 units records a second, quieter
+defect: a dense tremor on a single axis, usually roll. One axis carries many small spikes per
+second while the other two stay calm. Each spike is too small to count as a false rotation, but
+together they make the stabilized picture shiver.
+
+**Remove DJI Gyrogate false rotations** now smooths that tremor as well, on the affected axis
+only and only where the spikes pile up. The other axes and the calm parts of the clip are not
+touched.
+
+- On the public O4 Pro sample clip, which 1.0.3 reported as clean, the roll jitter drops from
+  0.072° to 0.017° per frame.
+- On a real 2026 O4 Pro flight, the tremor drops by about half where it was strongest. The calm
+  stretches are unchanged.
+
+The **Motion data** panel shows how many seconds of tremor the clip has, and the repair now
+also turns on for clips with tremor only. **Sensitivity** moves the tremor floor along with the
+false-rotation threshold, and **Save corrected copy** includes the tremor repair.
+
+Jolts or jello that you can already see in the raw footage are real camera motion, not
+Gyrogate, and no motion-data repair can remove them. See
+[Limits]({{ '/gyrogate.html#limits' | relative_url }}).
+
+### Colour panel in your language
+
+The **Color** panel labels follow the app language: English by default, Portuguese with the
+pt_BR language. The About tagline is in English too: "Gyroflow enhanced for FPV pilots".
+
+### Smaller Windows download
+
+The 1.0.3 Windows zip held every file twice, once at the top and once in a `win64` folder. The
+1.0.4 zip holds each file once, so the download is about half the size.
+
+### Website and documentation
+
+FPVFlow now has this website, with the full documentation.
 
 ---
 
