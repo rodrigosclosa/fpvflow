@@ -175,6 +175,14 @@ description: >-
   .compare figure { margin: 0; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: #000; }
   .compare figcaption { padding: 10px 14px; color: var(--muted); font-size: 14px; background: var(--card); }
 
+  /* Community video */
+  .video {
+    max-width: 960px; margin: 0 auto; aspect-ratio: 16 / 9;
+    border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); background: #000;
+  }
+  .video iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .video-credit { margin: 16px 0 0; text-align: center; color: var(--muted); font-size: 14px; }
+
   /* Grid of inherited features */
   .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
   .card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); padding: 22px; }
@@ -385,6 +393,23 @@ description: >-
           <figcaption>Raw footage and stabilized result</figcaption>
         </figure>
       </div>
+    </div>
+  </section>
+
+  <section id="video">
+    <div class="wrap">
+      <div class="center">
+        <div class="kicker">From the community</div>
+        <h2>Gyroflow vs FPVFlow</h2>
+        <p class="section-lead">Olac FPV puts the two apps head to head and shows how to fix the DJI O4 Gyrogate.</p>
+      </div>
+      <div class="video">
+        <iframe loading="lazy" src="https://www.youtube-nocookie.com/embed/hJDBVlueT6s" title="Gyroflow vs FPVFlow, by Olac FPV" allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+      </div>
+      <p class="video-credit">
+        Video by <a href="https://www.youtube.com/@olacfpv">Olac FPV</a> -
+        <a href="https://www.youtube.com/watch?v=hJDBVlueT6s">watch it on YouTube</a>. Thank you for making it!
+      </p>
     </div>
   </section>
 
